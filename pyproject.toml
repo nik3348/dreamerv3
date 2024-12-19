@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "ptnn3"
+version = "0.1.0"
+description = ""
+authors = ["Nicholas Lai Jin Yung <nicklai88@live.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+ale-py = "^0.10.1"
+torch = "^2.5.1"
+gymnasium = "^1.0.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
