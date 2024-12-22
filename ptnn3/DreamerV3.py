@@ -113,9 +113,9 @@ class DreamerV3(nn.Module):
     def forward(self, obs, h, action):
         z = self.encoder(obs)
         h_next, z_pred, reward, cont_flag = self.rssm(z, h, action)
-        obs_next = self.decoder(z)
+        obs_pred = self.decoder(z)
 
         action = self.actor(h_next)
         value = self.critic(h_next)
 
-        return h_next, z_pred, reward, cont_flag, obs_next, action, value
+        return h_next, z_pred, reward, cont_flag, obs_pred, action, value

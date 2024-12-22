@@ -2,53 +2,45 @@ import ale_py
 import gymnasium as gym
 import torch
 
-from ptnn3.DreamerV3 import DreamerV3 
+from ptnn3.DreamerV3 import DreamerV3
+from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
-isHuman = True
+isHuman = False
 epochs = 20
 
-obs_dim = 3
-x_dim = 128
-y_dim = 63
 z_dim = 65
 h_dim = 128
 action_dim = 4
 
+gym.register_envs(ale_py)
+env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
+buffer = PrioritizedReplayBuffer(1000)
+
+y_dim, x_dim, obs_dim = env.observation_space.shape
 dreamer = DreamerV3(obs_dim, z_dim, h_dim, action_dim, x_dim, y_dim)
 
-# Random input tensors
-obs = torch.randn(16, obs_dim, x_dim, y_dim)
-h = torch.randn(16, h_dim)
-action = torch.randn(16, action_dim)
+for i in range(epochs):
+    done = False
+    obs, info = env.reset()
+    obs = torch.tensor(obs, dtype=torch.float32).permute(2, 1, 0) / 255.0
 
-# Forward pass
-h_next, z_pred, reward, cont_flag, obs_next, action, value = dreamer(obs, h, action)
+    h = torch.randn(h_dim).unsqueeze(0)
+    action = torch.zeros(action_dim).unsqueeze(0)
 
-# Print output shapes
-print(h_next.shape)
-print(z_pred.shape)
-print(reward.shape)
-print(cont_flag.shape)
-print(obs_next.shape)
-print(action.shape)
-print(value.shape)
+    while not done:
+        next_obs, reward, terminated, truncated, info = env.step(2)
+        next_obs = torch.tensor(next_obs, dtype=torch.float32).permute(2, 1, 0) / 255.0
 
-# gym.register_envs(ale_py)
-# env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
+        done = terminated or truncated
 
-# print(env.observation_space)
-# print(env.action_space)
+        h_next, z_pred, reward, cont_flag, obs_pred, action_next, value = dreamer(
+            obs.unsqueeze(0), h, action
+        )
 
-# for i in range(epochs):
-#     done = False
-#     obs, info = env.reset()
+        # buffer.add((obs, next_obs, action, reward, done))
+        h = h_next
+        action = action_next
+        obs = next_obs
 
-#     while not done:
-#         action = 0
-
-#         next_obs, reward, terminated, truncated, info = env.step(action)
-#         done = terminated or truncated
-
-# env.close()
-
+env.close()
