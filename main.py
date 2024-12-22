@@ -1,20 +1,54 @@
 import ale_py
 import gymnasium as gym
+import torch
+
+from ptnn3.DreamerV3 import DreamerV3 
+
 
 isHuman = True
 epochs = 20
 
-gym.register_envs(ale_py)
-env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
+obs_dim = 3
+x_dim = 128
+y_dim = 63
+z_dim = 65
+h_dim = 128
+action_dim = 4
 
-for i in range(epochs):
-    done = False
-    obs, info = env.reset()
+dreamer = DreamerV3(obs_dim, z_dim, h_dim, action_dim, x_dim, y_dim)
 
-    while not done:
-        action = 0
+# Random input tensors
+obs = torch.randn(16, obs_dim, x_dim, y_dim)
+h = torch.randn(16, h_dim)
+action = torch.randn(16, action_dim)
 
-        next_obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+# Forward pass
+h_next, z_pred, reward, cont_flag, obs_next, action, value = dreamer(obs, h, action)
 
-env.close()
+# Print output shapes
+print(h_next.shape)
+print(z_pred.shape)
+print(reward.shape)
+print(cont_flag.shape)
+print(obs_next.shape)
+print(action.shape)
+print(value.shape)
+
+# gym.register_envs(ale_py)
+# env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
+
+# print(env.observation_space)
+# print(env.action_space)
+
+# for i in range(epochs):
+#     done = False
+#     obs, info = env.reset()
+
+#     while not done:
+#         action = 0
+
+#         next_obs, reward, terminated, truncated, info = env.step(action)
+#         done = terminated or truncated
+
+# env.close()
+
