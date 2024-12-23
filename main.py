@@ -15,41 +15,33 @@ action_dim = 4
 
 gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
-world_model_buffer = PrioritizedReplayBuffer(1000)
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 y_dim, x_dim, obs_dim = env.observation_space.shape
-dreamer = DreamerV3(obs_dim, z_dim, h_dim, action_dim, x_dim, y_dim)
+dreamer = DreamerV3(obs_dim, z_dim, h_dim, action_dim, x_dim, y_dim).to(device)
+world_model_buffer = PrioritizedReplayBuffer(1000)
 
 for i in range(epochs):
     done = False
     obs, info = env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32).permute(2, 1, 0) / 255.0
+    obs = torch.tensor(obs, dtype=torch.float32).to(device).permute(2, 1, 0) / 255.0
     obs = obs[:, :, 2:]  # Remove two rows of the height
 
-    h = torch.randn(h_dim)
-    action = torch.zeros(action_dim)
+    h = torch.randn(h_dim).to(device)
+    action = torch.zeros(action_dim).to(device)
 
     while not done:
         selected_action = action.argmax().item()
         next_obs, reward, terminated, truncated, info = env.step(selected_action)
         done = terminated or truncated
 
-        next_obs = torch.tensor(next_obs, dtype=torch.float32).permute(2, 1, 0) / 255.0
-        reward = torch.tensor(reward, dtype=torch.float32).unsqueeze(0)
-        done = torch.tensor(done, dtype=torch.float32).unsqueeze(0)
+        next_obs = torch.tensor(next_obs, dtype=torch.float32).to(device).permute(2, 1, 0) / 255.0
+        reward = torch.tensor(reward, dtype=torch.float32).to(device).unsqueeze(0)
+        done = torch.tensor(done, dtype=torch.float32).to(device).unsqueeze(0)
 
         h_next, z, z_pred, reward_pred, cont_pred, obs_pred, action_next, value = (
-            dreamer(obs.unsqueeze(0), h.unsqueeze(0), action.unsqueeze(0))
+            dreamer(obs, h, action)
         )
-
-        # Unsqueeze to remove the batch dimension
-        h_next = h_next.squeeze(0)
-        z = z.squeeze(0)
-        z_pred = z_pred.squeeze(0)
-        reward_pred = reward_pred.squeeze(0)
-        cont_pred = cont_pred.squeeze(0)
-        obs_pred = obs_pred.squeeze(0)
-        action_next = action_next.squeeze(0)
 
         world_model_buffer.add(
             (

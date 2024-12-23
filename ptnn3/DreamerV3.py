@@ -120,6 +120,11 @@ class DreamerV3(nn.Module):
         )
 
     def forward(self, obs, h, action):
+        # Unsqueeze to add the batch dimension
+        obs = obs.unsqueeze(0)
+        h = h.unsqueeze(0)
+        action = action.unsqueeze(0)
+
         z = self.encoder(obs)
         input = torch.cat([z, action], dim=-1)
 
@@ -128,6 +133,16 @@ class DreamerV3(nn.Module):
 
         action_pred = self.actor(h_next)
         value = self.critic(h_next)
+
+        # Squeeze to remove the batch dimension
+        h_next = h_next.squeeze(0)
+        input = input.squeeze(0)
+        z_pred = z_pred.squeeze(0)
+        reward_pred = reward_pred.squeeze(0)
+        cont_pred = cont_pred.squeeze(0)
+        obs_pred = obs_pred.squeeze(0)
+        action_pred = action_pred.squeeze(0)
+        value = value.squeeze(0)
 
         return (
             h_next,
