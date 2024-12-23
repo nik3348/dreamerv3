@@ -4,16 +4,13 @@ import torch.nn.functional as F
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, z_dim, input_width=64, input_height=64):
+    def __init__(self, input_dim, z_dim, feature_width=8, feature_height=8):
         super(Encoder, self).__init__()
         self.conv1 = nn.Conv2d(input_dim, 32, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
 
-        self.feature_width = input_width // 8
-        self.feature_height = input_height // 8
-
-        self.fc = nn.Linear(128 * self.feature_width * self.feature_height, z_dim)
+        self.fc = nn.Linear(128 * feature_width * feature_height, z_dim)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -25,9 +22,12 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, z_dim, output_dim):
+    def __init__(self, z_dim, output_dim, feature_width=8, feature_height=8):
         super(Decoder, self).__init__()
-        self.fc = nn.Linear(z_dim, 128 * 8 * 8)
+        self.feature_width = feature_width
+        self.feature_height = feature_height
+        self.fc = nn.Linear(z_dim, 128 * feature_width * feature_height)
+
         self.conv1 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.ConvTranspose2d(
@@ -36,7 +36,7 @@ class Decoder(nn.Module):
 
     def forward(self, z):
         x = self.fc(z)
-        x = x.view(x.size(0), 128, 8, 8)
+        x = x.view(x.size(0), 128, self.feature_width, self.feature_height)
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = self.conv3(x)
@@ -57,20 +57,19 @@ class RSSM(nn.Module):
         eps = torch.randn_like(std)
         return mean + eps * std
 
-    def forward(self, z, h, action):
-        input = torch.cat([z, action], dim=-1)
+    def forward(self, z, h, input):
         h_next, _ = self.sequence(input.unsqueeze(0), h.unsqueeze(0))
         h_next = h_next.squeeze(0)
 
         # dynamics tries to predict the latent state from the previous hidden state
         z_pred = self.dynamics(h)
 
-        # latent_state is the bundle of h the hidden state and z the latent state
-        latent_state = torch.cat([h, z], dim=-1)
-        reward = self.reward_predictor(latent_state)
-        cont_flag = torch.sigmoid(self.continue_predictor(latent_state))
+        # model_state is a bundle of h the hidden state and z the latent state
+        model_state = torch.cat([h, z], dim=-1)
+        reward_pred = self.reward_predictor(model_state)
+        cont_flag = torch.sigmoid(self.continue_predictor(model_state))
 
-        return h_next, z_pred, reward, cont_flag
+        return h_next, z_pred, reward_pred, cont_flag
 
 
 class Actor(nn.Module):
@@ -102,20 +101,91 @@ class Critic(nn.Module):
 
 
 class DreamerV3(nn.Module):
-    def __init__(self, input_dim, z_dim, h_dim, action_dim, input_width=None, input_height=None):
+    def __init__(
+        self, input_dim, z_dim, h_dim, action_dim, input_width=64, input_height=64
+    ):
         super(DreamerV3, self).__init__()
-        self.encoder = Encoder(input_dim, z_dim, input_width, input_height)
-        self.decoder = Decoder(z_dim, input_dim)
+        feature_width = input_width // 8
+        feature_height = input_height // 8
+
+        self.encoder = Encoder(input_dim, z_dim, feature_width, feature_height)
+        self.decoder = Decoder(z_dim, input_dim, feature_width, feature_height)
         self.rssm = RSSM(z_dim, h_dim, action_dim)
         self.actor = Actor(h_dim, action_dim)
         self.critic = Critic(h_dim)
 
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode="min", factor=0.5, patience=10
+        )
+
     def forward(self, obs, h, action):
         z = self.encoder(obs)
-        h_next, z_pred, reward, cont_flag = self.rssm(z, h, action)
+        input = torch.cat([z, action], dim=-1)
+
+        h_next, z_pred, reward_pred, cont_pred = self.rssm(z, h, input)
         obs_pred = self.decoder(z)
 
-        action = self.actor(h_next)
+        action_pred = self.actor(h_next)
         value = self.critic(h_next)
 
-        return h_next, z_pred, reward, cont_flag, obs_pred, action, value
+        return (
+            h_next,
+            input,
+            z_pred,
+            reward_pred,
+            cont_pred,
+            obs_pred,
+            action_pred,
+            value,
+        )
+
+    def train_world_model(self, batch):
+        (
+            obs,
+            obs_pred,
+            z,
+            z_pred,
+            reward,
+            reward_pred,
+            done,
+            cont_pred,
+        ) = batch
+
+        # Compute the prediction losses
+        obs_loss = F.mse_loss(obs_pred, obs)
+        reward_loss = F.mse_loss(reward_pred, reward)
+        cont_loss = F.binary_cross_entropy(cont_pred, done.float())
+
+        pred_coef = 1
+        pred_loss = obs_loss + reward_loss + cont_loss
+
+        dynamics_coef = 0.5
+        dynamics_loss = torch.clamp(
+            F.kl_div(z.detach(), z_pred, reduction="batchmean"), min=1.0
+        )
+
+        representation_coef = 0.1
+        representation_loss = torch.clamp(
+            F.kl_div(z, z_pred.detach(), reduction="batchmean"), min=1.0
+        )
+
+        total_loss = (
+            pred_coef * pred_loss
+            + dynamics_coef * dynamics_loss
+            + representation_coef * representation_loss
+        )
+
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+
+        return total_loss
+
+    # Convert to neural net approximate
+    # Symlog predictionis sin decoder, reward predictor, and critic
+    def symlog(self, x):
+        return torch.sign(x) * torch.log(torch.abs(x) + 1)
+
+    def symexp(self, x):
+        return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
