@@ -47,7 +47,7 @@ class RSSM(nn.Module):
     def __init__(self, z_dim, h_dim, action_dim):
         super(RSSM, self).__init__()
         self.sequence = nn.GRU(z_dim + action_dim, h_dim)
-        self.dynamics = nn.Linear(h_dim, z_dim + action_dim)
+        self.dynamics = nn.Linear(h_dim, z_dim)
 
         self.reward_predictor = nn.Linear(h_dim + z_dim, 1)
         self.continue_predictor = nn.Linear(h_dim + z_dim, 1)
@@ -57,7 +57,8 @@ class RSSM(nn.Module):
         eps = torch.randn_like(std)
         return mean + eps * std
 
-    def forward(self, z, h, input):
+    def forward(self, z, h, action):
+        input = torch.cat([z, action], dim=-1)
         h_next, _ = self.sequence(input.unsqueeze(0), h.unsqueeze(0))
         h_next = h_next.squeeze(0)
 
@@ -111,8 +112,8 @@ class DreamerV3(nn.Module):
         self.encoder = Encoder(input_dim, z_dim, feature_width, feature_height)
         self.decoder = Decoder(z_dim, input_dim, feature_width, feature_height)
         self.rssm = RSSM(z_dim, h_dim, action_dim)
-        self.actor = Actor(h_dim, action_dim)
-        self.critic = Critic(h_dim)
+        self.actor = Actor(h_dim + z_dim, action_dim)
+        self.critic = Critic(h_dim + z_dim)
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -126,17 +127,16 @@ class DreamerV3(nn.Module):
         action = action.unsqueeze(0)
 
         z = self.encoder(obs)
-        input = torch.cat([z, action], dim=-1)
-
-        h_next, z_pred, reward_pred, cont_pred = self.rssm(z, h, input)
+        h_next, z_pred, reward_pred, cont_pred = self.rssm(z, h, action)
         obs_pred = self.decoder(z)
 
-        action_pred = self.actor(h_next)
-        value = self.critic(h_next)
+        model_state = torch.cat([h, z_pred], dim=-1)
+        action_pred = self.actor(model_state)
+        value = self.critic(model_state)
 
         # Squeeze to remove the batch dimension
         h_next = h_next.squeeze(0)
-        input = input.squeeze(0)
+        z = z.squeeze(0)
         z_pred = z_pred.squeeze(0)
         reward_pred = reward_pred.squeeze(0)
         cont_pred = cont_pred.squeeze(0)
@@ -146,7 +146,7 @@ class DreamerV3(nn.Module):
 
         return (
             h_next,
-            input,
+            z,
             z_pred,
             reward_pred,
             cont_pred,
@@ -196,6 +196,48 @@ class DreamerV3(nn.Module):
         self.optimizer.step()
 
         return total_loss
+
+    def train_actor_critic(self, batch):
+        action_pred, rewards, values, continuation_flags = batch
+        action_pred.requires_grad_(True)
+
+        eta = 3e-4  # Entropy weight
+        gamma = 0.997  # Discount factor
+        lambda_ = 0.95  # Lambda parameter
+
+        T = rewards.size(0)  # Number of time steps
+        lambda_returns = torch.zeros_like(rewards)
+
+        # Bootstrap with the critic's value prediction for the last state
+        lambda_returns[-1] = values[-1]
+
+        # Backward recursion to compute lambda-returns
+        for t in reversed(range(T - 1)):
+            bootstrap = (1 - lambda_) * values[t + 1] + lambda_ * lambda_returns[t + 1]
+            lambda_returns[t] = rewards[t] + gamma * continuation_flags[t] * bootstrap
+
+        # Stop-gradient operation
+        lambda_returns = lambda_returns.detach()  # Treat λ-returns as constants
+
+        scaling_factor = torch.quantile(lambda_returns, 0.95) - torch.quantile(
+            lambda_returns, 0.05
+        )
+        scaling_factor = torch.clamp(scaling_factor, min=1.0)
+        scaled_returns = lambda_returns / scaling_factor
+        policy_gradient_loss = -torch.sum(scaled_returns * action_pred)
+
+        policy_probs = F.softmax(action_pred, dim=-1)  # Shape [B, T, A]
+        policy_log_probs = F.log_softmax(action_pred, dim=-1)  # Shape [B, T, A]
+        entropy = -(policy_probs * policy_log_probs).sum(dim=-1)  # Shape [B, T]
+        entropy_regularization = -eta * torch.sum(entropy)
+
+        actor_loss = policy_gradient_loss + entropy_regularization
+
+        self.optimizer.zero_grad()
+        actor_loss.backward()
+        self.optimizer.step()
+
+        return actor_loss
 
     # Convert to neural net approximate
     # Symlog predictionis sin decoder, reward predictor, and critic
