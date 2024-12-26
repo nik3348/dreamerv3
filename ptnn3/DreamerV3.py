@@ -108,6 +108,7 @@ class DreamerV3(nn.Module):
         super(DreamerV3, self).__init__()
         feature_width = input_width // 8
         feature_height = input_height // 8
+        self.h_dim = h_dim
 
         self.encoder = Encoder(input_dim, z_dim, feature_width, feature_height)
         self.decoder = Decoder(z_dim, input_dim, feature_width, feature_height)
@@ -195,26 +196,51 @@ class DreamerV3(nn.Module):
         total_loss.backward()
         self.optimizer.step()
 
-        return total_loss
+        return total_loss.item()
 
-    def train_actor_critic(self, batch):
-        action_pred, rewards, values, continuation_flags = batch
-        action_pred.requires_grad_(True)
-
+    def train_actor_critic(self, obs):
         eta = 3e-4  # Entropy weight
         gamma = 0.997  # Discount factor
         lambda_ = 0.95  # Lambda parameter
 
-        T = rewards.size(0)  # Number of time steps
-        lambda_returns = torch.zeros_like(rewards)
+        z = self.encoder(obs[0].unsqueeze(0))
+        h = torch.randn(self.h_dim).to(obs.device).unsqueeze(0)
+        zt = [z.squeeze(0)]
+        ht = [h.squeeze(0)]
+        reward_t = []
+        cont_t = []
+        action_t = []
+        value_t = []
+
+        T = 16
+        for t in range(T):
+            model_state = torch.cat([h, z], dim=-1)
+            action = self.actor(model_state)
+            value = self.critic(model_state)
+            h, z, reward_pred, cont_pred = self.rssm(z, h, action)
+
+            zt.append(z.squeeze(0))
+            ht.append(h.squeeze(0))
+            reward_t.append(reward_pred.squeeze(0))
+            cont_t.append(cont_pred.squeeze(0))
+            action_t.append(action.squeeze(0))
+            value_t.append(value.squeeze(0))
+
+        zt = torch.stack(zt)
+        ht = torch.stack(ht)
+        reward_t = torch.stack(reward_t)
+        cont_t = torch.stack(cont_t)
+        action_t = torch.stack(action_t)
+        value_t = torch.stack(value_t)
 
         # Bootstrap with the critic's value prediction for the last state
-        lambda_returns[-1] = values[-1]
+        lambda_returns = torch.zeros_like(reward_t)
+        lambda_returns[-1] = value_t[-1]
 
         # Backward recursion to compute lambda-returns
         for t in reversed(range(T - 1)):
-            bootstrap = (1 - lambda_) * values[t + 1] + lambda_ * lambda_returns[t + 1]
-            lambda_returns[t] = rewards[t] + gamma * continuation_flags[t] * bootstrap
+            bootstrap = (1 - lambda_) * value_t[t + 1] + lambda_ * lambda_returns[t + 1]
+            lambda_returns[t] = reward_t[t] + gamma * cont_t[t] * bootstrap
 
         # Stop-gradient operation
         lambda_returns = lambda_returns.detach()  # Treat λ-returns as constants
@@ -224,10 +250,10 @@ class DreamerV3(nn.Module):
         )
         scaling_factor = torch.clamp(scaling_factor, min=1.0)
         scaled_returns = lambda_returns / scaling_factor
-        policy_gradient_loss = -torch.sum(scaled_returns * action_pred)
+        policy_gradient_loss = -torch.sum(scaled_returns * action_t)
 
-        policy_probs = F.softmax(action_pred, dim=-1)  # Shape [B, T, A]
-        policy_log_probs = F.log_softmax(action_pred, dim=-1)  # Shape [B, T, A]
+        policy_probs = F.softmax(action_t, dim=-1)  # Shape [B, T, A]
+        policy_log_probs = F.log_softmax(action_t, dim=-1)  # Shape [B, T, A]
         entropy = -(policy_probs * policy_log_probs).sum(dim=-1)  # Shape [B, T]
         entropy_regularization = -eta * torch.sum(entropy)
 
@@ -237,7 +263,7 @@ class DreamerV3(nn.Module):
         actor_loss.backward()
         self.optimizer.step()
 
-        return actor_loss
+        return actor_loss.item()
 
     # Convert to neural net approximate
     # Symlog predictionis sin decoder, reward predictor, and critic

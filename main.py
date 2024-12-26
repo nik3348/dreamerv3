@@ -1,6 +1,8 @@
 import ale_py
-import gymnasium as gym
+import datetime
 import torch
+from torch.utils.tensorboard import SummaryWriter
+import gymnasium as gym
 
 from ptnn3.ReplayBuffer import ReplayBuffer
 from ptnn3.DreamerV3 import DreamerV3
@@ -8,7 +10,8 @@ from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-epochs = 10
+MAX_STEPS = 1000
+epochs = 3
 
 z_dim = 64
 h_dim = 128
@@ -23,12 +26,15 @@ dreamer = DreamerV3(obs_dim, z_dim, h_dim, action_dim, x_dim, y_dim).to(device)
 world_model_buffer = PrioritizedReplayBuffer(500)
 actor_critic_buffer = ReplayBuffer(500)
 
+log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+writer = SummaryWriter(log_dir)
+
 try:
     dreamer.load_state_dict(torch.load("dreamer.pt", weights_only=True))
 except FileNotFoundError:
     print("No model found")
 
-for i in range(epochs):
+for epoch in range(epochs):
     done = False
     steps = 0
     obs, info = env.reset()
@@ -37,7 +43,7 @@ for i in range(epochs):
     h = torch.randn(h_dim).to(device)
     action = torch.zeros(action_dim).to(device)
 
-    while not done and steps < 500:
+    while not done and steps < MAX_STEPS:
         steps += 1
         selected_action = action.argmax().item()
         next_obs, reward, terminated, truncated, info = env.step(selected_action)
@@ -68,20 +74,13 @@ for i in range(epochs):
             )
         )
 
-        actor_critic_buffer.add(
-            action_next,
-            reward,
-            value,
-            done,
-        )
-
         obs = next_obs
         h = h_next
         action = action_next
 
     # Train the model
     print("==============================")
-    print("Starting training for epoch", i)
+    print("Starting training for epoch", epoch)
     batch, indices, weights = world_model_buffer.sample(10)
 
     obs_batch = []
@@ -123,13 +122,15 @@ for i in range(epochs):
         cont_pred_batch,
     )
 
-    print("Training world model")
-    loss = dreamer.train_world_model(batch)
-    dreamer.scheduler.step(loss)
+    world_model_loss = dreamer.train_world_model(batch)
+    dreamer.scheduler.step(world_model_loss)
+    print("World Model Loss", world_model_loss)
 
-    print("Training actor critic")
-    batch = actor_critic_buffer.sample(4)
-    dreamer.train_actor_critic(batch)
+    actor_critic_loss = dreamer.train_actor_critic(batch[0])
+    print("Actor Critic Loss", actor_critic_loss)
+
+    # writer.add_scalar('World Model Loss/train', world_model_loss, epoch)
+    writer.add_scalar('Actor Critic Loss/train', actor_critic_loss, epoch)
 
     torch.save(dreamer.state_dict(), "dreamer.pt")
 

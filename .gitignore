@@ -17,4 +17,6 @@
 
 .venv
 /poetry.toml
+
+logs/*
 *.pt
