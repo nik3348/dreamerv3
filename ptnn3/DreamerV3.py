@@ -4,39 +4,55 @@ import torch.nn.functional as F
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, z_dim, feature_width=8, feature_height=8):
+    def __init__(self, input_dim, latent_dim=32, num_categories=32):
         super(Encoder, self).__init__()
+        # TODO: Change to kernal size 3
         self.conv1 = nn.Conv2d(input_dim, 32, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(
+            64, latent_dim * num_categories, kernel_size=4, stride=2, padding=1
+        )
 
-        self.fc = nn.Linear(128 * feature_width * feature_height, z_dim)
+        self.flatten = nn.Flatten()
+        self.fc_logits = nn.Linear(
+            latent_dim * num_categories * 20 * 26, latent_dim * num_categories
+        )
+        self.latent_dim = latent_dim
+        self.num_categories = num_categories
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)
-        z = self.fc(x)
+
+        x = self.flatten(x)
+        logits = self.fc_logits(x)
+        logits = logits.view(-1, self.latent_dim, self.num_categories)
+        probs = F.softmax(logits, dim=2)
+
+        z = torch.argmax(probs, dim=2)
+        z = F.one_hot(z, num_classes=self.num_categories).float()
+        z = (z - probs).detach() + probs
+        z = z.view(z.size(0), -1)
+
         return z
 
 
 class Decoder(nn.Module):
-    def __init__(self, z_dim, output_dim, feature_width=8, feature_height=8):
+    def __init__(self, state_dim, output_dim):
         super(Decoder, self).__init__()
-        self.feature_width = feature_width
-        self.feature_height = feature_height
-        self.fc = nn.Linear(z_dim, 128 * feature_width * feature_height)
+        self.fc = nn.Linear(state_dim, 1024 * 20 * 26)
 
-        self.conv1 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
+        self.conv1 = nn.ConvTranspose2d(1024, 64, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.ConvTranspose2d(
             32, output_dim, kernel_size=4, stride=2, padding=1
         )
 
     def forward(self, z):
-        x = self.fc(z)
-        x = x.view(x.size(0), 128, self.feature_width, self.feature_height)
+        x = F.relu(self.fc(z))
+        x = x.view(x.size(0), 1024, 20, 26)
+
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = self.conv3(x)
@@ -59,6 +75,7 @@ class RSSM(nn.Module):
 
     def forward(self, z, h, action):
         input = torch.cat([z, action], dim=-1)
+
         h_next, _ = self.sequence(input.unsqueeze(0), h.unsqueeze(0))
         h_next = h_next.squeeze(0)
 
@@ -66,7 +83,7 @@ class RSSM(nn.Module):
         z_pred = self.dynamics(h)
 
         # model_state is a bundle of h the hidden state and z the latent state
-        model_state = torch.cat([h, z], dim=-1)
+        model_state = torch.cat([h, z], dim=-1)  # TODO: Move r and c out of RSSM
         reward_pred = self.reward_predictor(model_state)
         cont_flag = torch.sigmoid(self.continue_predictor(model_state))
 
@@ -102,17 +119,17 @@ class Critic(nn.Module):
 
 
 class DreamerV3(nn.Module):
-    def __init__(
-        self, input_dim, z_dim, h_dim, action_dim, input_width=64, input_height=64
-    ):
+    def __init__(self, input_dim, h_dim, action_dim):
         super(DreamerV3, self).__init__()
-        feature_width = input_width // 8
-        feature_height = input_height // 8
-        self.h_dim = h_dim
+        latent_size = 32
+        self.num_categories = 32
 
-        self.encoder = Encoder(input_dim, z_dim, feature_width, feature_height)
-        self.decoder = Decoder(z_dim, input_dim, feature_width, feature_height)
-        self.rssm = RSSM(z_dim, h_dim, action_dim)
+        self.h_dim = h_dim
+        z_dim = latent_size * self.num_categories
+
+        self.encoder = Encoder(input_dim, latent_size, self.num_categories)
+        self.decoder = Decoder(h_dim + z_dim, input_dim)
+        self.rssm = RSSM(latent_size * self.num_categories, h_dim, action_dim)
         self.actor = Actor(h_dim + z_dim, action_dim)
         self.critic = Critic(h_dim + z_dim)
 
@@ -129,7 +146,7 @@ class DreamerV3(nn.Module):
 
         z = self.encoder(obs)
         h_next, z_pred, reward_pred, cont_pred = self.rssm(z, h, action)
-        obs_pred = self.decoder(z)
+        obs_pred = self.decoder(torch.cat([h, z], dim=-1))
 
         model_state = torch.cat([h, z_pred], dim=-1)
         action_pred = self.actor(model_state)
