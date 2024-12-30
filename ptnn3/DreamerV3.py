@@ -14,7 +14,7 @@ class Encoder(nn.Module):
         )
 
         self.flatten = nn.Flatten()
-        self.fc_logits = nn.Linear(
+        self.fc = nn.Linear(
             latent_dim * num_categories * 20 * 26, latent_dim * num_categories
         )
         self.latent_dim = latent_dim
@@ -26,15 +26,7 @@ class Encoder(nn.Module):
         x = F.relu(self.conv3(x))
 
         x = self.flatten(x)
-        logits = self.fc_logits(x)
-        logits = logits.view(-1, self.latent_dim, self.num_categories)
-        probs = F.softmax(logits, dim=2)
-
-        z = torch.argmax(probs, dim=2)
-        z = F.one_hot(z, num_classes=self.num_categories).float()
-        z = (z - probs).detach() + probs
-        z = z.view(z.size(0), -1)
-
+        z = self.fc(x)
         return z
 
 
@@ -119,17 +111,16 @@ class Critic(nn.Module):
 
 
 class DreamerV3(nn.Module):
-    def __init__(self, input_dim, h_dim, action_dim):
+    def __init__(self, input_dim, h_dim, action_dim, latent_dim=32, num_categories=32):
         super(DreamerV3, self).__init__()
-        latent_size = 32
-        self.num_categories = 32
-
         self.h_dim = h_dim
-        z_dim = latent_size * self.num_categories
+        self.latent_dim = latent_dim
+        self.num_categories = num_categories
+        z_dim = latent_dim * num_categories
 
-        self.encoder = Encoder(input_dim, latent_size, self.num_categories)
+        self.encoder = Encoder(input_dim, latent_dim, num_categories)
         self.decoder = Decoder(h_dim + z_dim, input_dim)
-        self.rssm = RSSM(latent_size * self.num_categories, h_dim, action_dim)
+        self.rssm = RSSM(latent_dim * num_categories, h_dim, action_dim)
         self.actor = Actor(h_dim + z_dim, action_dim)
         self.critic = Critic(h_dim + z_dim)
 
@@ -145,12 +136,18 @@ class DreamerV3(nn.Module):
         action = action.unsqueeze(0)
 
         z = self.encoder(obs)
-        h_next, z_pred, reward_pred, cont_pred = self.rssm(z, h, action)
-        obs_pred = self.decoder(torch.cat([h, z], dim=-1))
+        z_sample = self.sample_latent(z)
 
-        model_state = torch.cat([h, z_pred], dim=-1)
+        h_next, z_pred, reward_pred, cont_pred = self.rssm(z_sample, h, action)
+        obs_pred = self.decoder(torch.cat([h, z_sample], dim=-1))
+
+        z_pred_sample = self.sample_latent(z_pred)
+        model_state = torch.cat([h, z_pred_sample], dim=-1)
         action_pred = self.actor(model_state)
         value = self.critic(model_state)
+
+        z = z.view(-1, self.latent_dim, self.num_categories)
+        z_pred = z_pred.view(-1, self.latent_dim, self.num_categories)
 
         # Squeeze to remove the batch dimension
         h_next = h_next.squeeze(0)
@@ -173,6 +170,17 @@ class DreamerV3(nn.Module):
             value,
         )
 
+    def sample_latent(self, z):
+        z = z.view(-1, self.latent_dim, self.num_categories)
+
+        probs = F.softmax(z, dim=-1)
+        z_hard = torch.argmax(probs, dim=-1)
+        sample = F.one_hot(z_hard, num_classes=self.num_categories).float()
+
+        sample = (sample + probs) - probs.detach()
+        sample = sample.view(sample.size(0), -1)
+        return sample
+
     def train_world_model(self, batch):
         (
             obs,
@@ -194,14 +202,12 @@ class DreamerV3(nn.Module):
         pred_loss = obs_loss + reward_loss + cont_loss
 
         dynamics_coef = 0.5
-        dynamics_loss = torch.clamp(
-            F.kl_div(z.detach(), z_pred, reduction="batchmean"), min=1.0
-        )
+        dynamics_kl_div = self.compute_kl_divergence(z.detach(), z_pred).mean()
+        dynamics_loss = torch.clamp(dynamics_kl_div, min=1.0)
 
         representation_coef = 0.1
-        representation_loss = torch.clamp(
-            F.kl_div(z, z_pred.detach(), reduction="batchmean"), min=1.0
-        )
+        representation_kl_div = self.compute_kl_divergence(z, z_pred.detach()).mean()
+        representation_loss = torch.clamp(representation_kl_div, min=1.0)
 
         total_loss = (
             pred_coef * pred_loss
@@ -214,6 +220,17 @@ class DreamerV3(nn.Module):
         self.optimizer.step()
 
         return total_loss.item()
+
+    def compute_kl_divergence(self, p_logits, q_logits):
+        q_probs = F.softmax(q_logits, dim=-1)
+        q_log_probs = F.log_softmax(q_logits, dim=-1)
+        p_log_probs = F.log_softmax(p_logits, dim=-1)
+
+        kl_per_category = q_probs * (q_log_probs - p_log_probs)
+        kl_per_row = kl_per_category.sum(dim=-1)
+        kl_loss = kl_per_row.sum(dim=-1)
+
+        return kl_loss
 
     def train_actor_critic(self, obs):
         eta = 3e-4  # Entropy weight
@@ -234,7 +251,8 @@ class DreamerV3(nn.Module):
             model_state = torch.cat([h, z], dim=-1)
             action = self.actor(model_state)
             value = self.critic(model_state)
-            h, z, reward_pred, cont_pred = self.rssm(z, h, action)
+            h, z_pred, reward_pred, cont_pred = self.rssm(z, h, action)
+            # z = dynamics() for the next step
 
             zt.append(z.squeeze(0))
             ht.append(h.squeeze(0))
