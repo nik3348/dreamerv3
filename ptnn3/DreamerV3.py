@@ -4,21 +4,15 @@ import torch.nn.functional as F
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, latent_dim=32, num_categories=32):
+    def __init__(self, input_dim, z_dim, height=32, width=32):
         super(Encoder, self).__init__()
         # TODO: Change to kernal size 3
         self.conv1 = nn.Conv2d(input_dim, 32, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(
-            64, latent_dim * num_categories, kernel_size=4, stride=2, padding=1
-        )
+        self.conv3 = nn.Conv2d(64, z_dim, kernel_size=4, stride=2, padding=1)
 
         self.flatten = nn.Flatten()
-        self.fc = nn.Linear(
-            latent_dim * num_categories * 20 * 26, latent_dim * num_categories
-        )
-        self.latent_dim = latent_dim
-        self.num_categories = num_categories
+        self.fc = nn.Linear(z_dim * (height // 8) * (width // 8), z_dim)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -31,11 +25,14 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, state_dim, output_dim):
+    def __init__(self, h_dim, z_dim, output_dim, height, width):
         super(Decoder, self).__init__()
-        self.fc = nn.Linear(state_dim, 1024 * 20 * 26)
+        self.z_dim = z_dim
+        self.height = height
+        self.width = width
 
-        self.conv1 = nn.ConvTranspose2d(1024, 64, kernel_size=4, stride=2, padding=1)
+        self.fc = nn.Linear(h_dim + z_dim, z_dim * (height // 8) * (width // 8))
+        self.conv1 = nn.ConvTranspose2d(z_dim, 64, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.ConvTranspose2d(
             32, output_dim, kernel_size=4, stride=2, padding=1
@@ -43,7 +40,7 @@ class Decoder(nn.Module):
 
     def forward(self, z):
         x = F.relu(self.fc(z))
-        x = x.view(x.size(0), 1024, 20, 26)
+        x = x.view(x.size(0), self.z_dim, (self.height // 8), (self.width // 8))
 
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
@@ -52,7 +49,7 @@ class Decoder(nn.Module):
 
 
 class RSSM(nn.Module):
-    def __init__(self, z_dim, h_dim, action_dim):
+    def __init__(self, h_dim, z_dim, action_dim):
         super(RSSM, self).__init__()
         self.sequence = nn.GRU(z_dim + action_dim, h_dim)
         self.dynamics = nn.Linear(h_dim, z_dim)
@@ -111,16 +108,25 @@ class Critic(nn.Module):
 
 
 class DreamerV3(nn.Module):
-    def __init__(self, input_dim, h_dim, action_dim, latent_dim=32, num_categories=32):
+    def __init__(
+        self,
+        input_dim,
+        h_dim,
+        action_dim,
+        latent_dim=32,
+        num_categories=32,
+        height=32,
+        width=32,
+    ):
         super(DreamerV3, self).__init__()
         self.h_dim = h_dim
         self.latent_dim = latent_dim
         self.num_categories = num_categories
         z_dim = latent_dim * num_categories
 
-        self.encoder = Encoder(input_dim, latent_dim, num_categories)
-        self.decoder = Decoder(h_dim + z_dim, input_dim)
-        self.rssm = RSSM(latent_dim * num_categories, h_dim, action_dim)
+        self.encoder = Encoder(input_dim, z_dim, height, width)
+        self.decoder = Decoder(h_dim, z_dim, input_dim, height, width)
+        self.rssm = RSSM(h_dim, z_dim, action_dim)
         self.actor = Actor(h_dim + z_dim, action_dim)
         self.critic = Critic(h_dim + z_dim)
 
@@ -137,7 +143,6 @@ class DreamerV3(nn.Module):
 
         z = self.encoder(obs)
         z_sample = self.sample_latent(z)
-
         h_next, z_pred, reward_pred, cont_pred = self.rssm(z_sample, h, action)
         obs_pred = self.decoder(torch.cat([h, z_sample], dim=-1))
 
@@ -301,7 +306,7 @@ class DreamerV3(nn.Module):
         return actor_loss.item()
 
     # Convert to neural net approximate
-    # Symlog predictionis sin decoder, reward predictor, and critic
+    # Symlog prediction is in decoder, reward predictor, and critic
     def symlog(self, x):
         return torch.sign(x) * torch.log(torch.abs(x) + 1)
 

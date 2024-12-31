@@ -11,6 +11,7 @@ ale-py = "^0.10.1"
 torch = "^2.5.1"
 gymnasium = "^1.0.0"
 tensorboard = "^2.18.0"
+torchvision = "^0.20.1"
 
 
 [build-system]

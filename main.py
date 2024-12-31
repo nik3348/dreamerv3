@@ -1,8 +1,10 @@
 import ale_py
 import datetime
 import torch
-from torch.utils.tensorboard import SummaryWriter
 import gymnasium as gym
+
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import transforms
 
 from ptnn3.ReplayBuffer import ReplayBuffer
 from ptnn3.DreamerV3 import DreamerV3
@@ -10,10 +12,10 @@ from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-MAX_STEPS = 10
+MAX_STEPS = 2
 epochs = 1
 
-h_dim = 128
+h_dim = 64
 action_dim = 4
 
 gym.register_envs(ale_py)
@@ -47,7 +49,7 @@ for epoch in range(epochs):
         selected_action = action.argmax().item()
         next_obs, reward, terminated, truncated, info = env.step(selected_action)
         done = terminated or truncated
-        obs = obs[:, :, 2:]
+        obs = transforms.Compose([transforms.Resize((32, 32))])(obs)
 
         next_obs = (
             torch.tensor(next_obs, dtype=torch.float32).to(device).permute(2, 1, 0)
@@ -80,7 +82,7 @@ for epoch in range(epochs):
     # Train the model
     print("==============================")
     print("Starting training for epoch", epoch)
-    batch, indices, weights = world_model_buffer.sample(10)
+    batch, indices, weights = world_model_buffer.sample(1)
 
     obs_batch = []
     obs_pred_batch = []
