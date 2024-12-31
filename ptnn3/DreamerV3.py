@@ -72,7 +72,7 @@ class RSSM(nn.Module):
         z_pred = self.dynamics(h)
 
         # model_state is a bundle of h the hidden state and z the latent state
-        model_state = torch.cat([h, z], dim=-1)  # TODO: Move r and c out of RSSM
+        model_state = torch.cat([h, z], dim=-1)  # TODO: Move reward and cont out of RSSM
         reward_pred = self.reward_predictor(model_state)
         cont_flag = torch.sigmoid(self.continue_predictor(model_state))
 

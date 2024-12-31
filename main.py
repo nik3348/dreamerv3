@@ -12,8 +12,9 @@ from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-MAX_STEPS = 2
-epochs = 1
+MAX_STEPS = 10000
+epochs = 10
+batch_size = 256
 
 h_dim = 64
 action_dim = 4
@@ -29,6 +30,7 @@ actor_critic_buffer = ReplayBuffer(500)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(log_dir)
+torch.autograd.set_detect_anomaly(True)
 
 try:
     dreamer.load_state_dict(torch.load("dreamer.pt", weights_only=True))
@@ -64,44 +66,26 @@ for epoch in range(epochs):
 
         world_model_buffer.add(
             (
-                obs,
-                obs_pred,
-                z,
-                z_pred,
-                reward,
-                reward_pred,
-                done,
-                cont_pred,
+                obs.detach(),
+                obs_pred.detach(),
+                z.detach(),
+                z_pred.detach(),
+                reward.detach(),
+                reward_pred.detach(),
+                done.detach(),
+                cont_pred.detach(),
             )
         )
 
-        obs = next_obs
-        h = h_next
-        action = action_next
+        obs = next_obs.detach()
+        h = h_next.detach()
+        action = action_next.detach()
 
     # Train the model
     print("==============================")
     print("Starting training for epoch", epoch)
-    batch, indices, weights = world_model_buffer.sample(1)
-
-    obs_batch = []
-    obs_pred_batch = []
-    z_batch = []
-    z_pred_batch = []
-    reward_batch = []
-    reward_pred_batch = []
-    done_batch = []
-    cont_pred_batch = []
-
-    for item in batch:
-        obs_batch.append(item[0])
-        obs_pred_batch.append(item[1])
-        z_batch.append(item[2])
-        z_pred_batch.append(item[3])
-        reward_batch.append(item[4])
-        reward_pred_batch.append(item[5])
-        done_batch.append(item[6])
-        cont_pred_batch.append(item[7])
+    batch, indices, weights = world_model_buffer.sample(batch_size)
+    obs_batch, obs_pred_batch, z_batch, z_pred_batch, reward_batch, reward_pred_batch, done_batch, cont_pred_batch = zip(*batch)
 
     obs_batch = torch.stack(obs_batch)
     obs_pred_batch = torch.stack(obs_pred_batch)
@@ -113,14 +97,14 @@ for epoch in range(epochs):
     cont_pred_batch = torch.stack(cont_pred_batch)
 
     batch = (
-        obs_batch,
-        obs_pred_batch,
-        z_batch,
-        z_pred_batch,
-        reward_batch,
-        reward_pred_batch,
-        done_batch,
-        cont_pred_batch,
+        obs_batch.requires_grad_(True),
+        obs_pred_batch.requires_grad_(True),
+        z_batch.requires_grad_(True),
+        z_pred_batch.requires_grad_(True),
+        reward_batch.requires_grad_(True),
+        reward_pred_batch.requires_grad_(True),
+        done_batch.requires_grad_(True),
+        cont_pred_batch.requires_grad_(True),
     )
 
     world_model_loss = dreamer.train_world_model(batch)
@@ -130,7 +114,7 @@ for epoch in range(epochs):
     # actor_critic_loss = dreamer.train_actor_critic(batch[0])
     # print("Actor Critic Loss", actor_critic_loss)
 
-    # writer.add_scalar('World Model Loss/train', world_model_loss, epoch)
+    writer.add_scalar('World Model Loss/train', world_model_loss, epoch)
     # writer.add_scalar('Actor Critic Loss/train', actor_critic_loss, epoch)
 
     torch.save(dreamer.state_dict(), "dreamer.pt")
