@@ -12,19 +12,21 @@ from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-MAX_STEPS = 10000
-epochs = 10
-batch_size = 256
+MAX_STEPS = 1000
+epochs = 1
+batch_size = 1024
 
 h_dim = 64
 action_dim = 4
+height = 32
+width = 32
 
 gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 y_dim, x_dim, obs_dim = env.observation_space.shape
-dreamer = DreamerV3(obs_dim, h_dim, action_dim).to(device)
+dreamer = DreamerV3(obs_dim, h_dim, action_dim, height=height, width=width).to(device)
 world_model_buffer = PrioritizedReplayBuffer(500)
 actor_critic_buffer = ReplayBuffer(500)
 
@@ -111,11 +113,11 @@ for epoch in range(epochs):
     dreamer.scheduler.step(world_model_loss)
     print("World Model Loss", world_model_loss)
 
-    # actor_critic_loss = dreamer.train_actor_critic(batch[0])
-    # print("Actor Critic Loss", actor_critic_loss)
+    actor_critic_loss = dreamer.train_actor_critic(batch[0])
+    print("Actor Critic Loss", actor_critic_loss)
 
     writer.add_scalar('World Model Loss/train', world_model_loss, epoch)
-    # writer.add_scalar('Actor Critic Loss/train', actor_critic_loss, epoch)
+    writer.add_scalar('Actor Critic Loss/train', actor_critic_loss, epoch)
 
     torch.save(dreamer.state_dict(), "dreamer.pt")
 

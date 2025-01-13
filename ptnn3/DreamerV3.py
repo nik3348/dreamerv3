@@ -72,7 +72,9 @@ class RSSM(nn.Module):
         z_pred = self.dynamics(h)
 
         # model_state is a bundle of h the hidden state and z the latent state
-        model_state = torch.cat([h, z], dim=-1)  # TODO: Move reward and cont out of RSSM
+        model_state = torch.cat(
+            [h, z], dim=-1
+        )  # TODO: Move reward and cont out of RSSM
         reward_pred = self.reward_predictor(model_state)
         cont_flag = torch.sigmoid(self.continue_predictor(model_state))
 
@@ -242,14 +244,13 @@ class DreamerV3(nn.Module):
         gamma = 0.997  # Discount factor
         lambda_ = 0.95  # Lambda parameter
 
-        z = self.encoder(obs[0].unsqueeze(0))
-        h = torch.randn(self.h_dim).to(obs.device).unsqueeze(0)
-        zt = [z.squeeze(0)]
-        ht = [h.squeeze(0)]
-        reward_t = []
-        cont_t = []
+        z = self.encoder(obs)
+        h = torch.randn(obs.size(0), self.h_dim).to(obs.device)
+
         action_t = []
         value_t = []
+        reward_t = []
+        cont_t = []
 
         T = 16
         for t in range(T):
@@ -259,19 +260,16 @@ class DreamerV3(nn.Module):
             h, z_pred, reward_pred, cont_pred = self.rssm(z, h, action)
             # z = dynamics() for the next step
 
-            zt.append(z.squeeze(0))
-            ht.append(h.squeeze(0))
-            reward_t.append(reward_pred.squeeze(0))
-            cont_t.append(cont_pred.squeeze(0))
-            action_t.append(action.squeeze(0))
-            value_t.append(value.squeeze(0))
+            # Squeeze since the output is a single value (b, 1) -> (b)
+            action_t.append(action)
+            value_t.append(value.squeeze(-1))
+            reward_t.append(reward_pred.squeeze(-1))
+            cont_t.append(cont_pred.squeeze(-1))
 
-        zt = torch.stack(zt)
-        ht = torch.stack(ht)
-        reward_t = torch.stack(reward_t)
-        cont_t = torch.stack(cont_t)
         action_t = torch.stack(action_t)
         value_t = torch.stack(value_t)
+        reward_t = torch.stack(reward_t)
+        cont_t = torch.stack(cont_t)
 
         # Bootstrap with the critic's value prediction for the last state
         lambda_returns = torch.zeros_like(reward_t)
@@ -290,12 +288,12 @@ class DreamerV3(nn.Module):
         )
         scaling_factor = torch.clamp(scaling_factor, min=1.0)
         scaled_returns = lambda_returns / scaling_factor
-        policy_gradient_loss = -torch.sum(scaled_returns * action_t)
+        policy_gradient_loss = -torch.sum(scaled_returns, dim=0).mean()
 
-        policy_probs = F.softmax(action_t, dim=-1)  # Shape [B, T, A]
-        policy_log_probs = F.log_softmax(action_t, dim=-1)  # Shape [B, T, A]
-        entropy = -(policy_probs * policy_log_probs).sum(dim=-1)  # Shape [B, T]
-        entropy_regularization = -eta * torch.sum(entropy)
+        policy_probs = F.softmax(action_t, dim=-1)  # Shape [T, B, A]
+        policy_log_probs = F.log_softmax(action_t, dim=-1)  # Shape [T, B, A]
+        entropy = -(policy_probs * policy_log_probs).sum(dim=-1)  # Shape [T, B]
+        entropy_regularization = -eta * torch.sum(entropy, dim=0).mean()
 
         actor_loss = policy_gradient_loss + entropy_regularization
 
