@@ -207,6 +207,7 @@ class DreamerV3(nn.Module):
             reward_pred,
             done,
             cont_pred,
+            _,
         ) = batch
 
         # Compute the prediction losses
@@ -234,6 +235,7 @@ class DreamerV3(nn.Module):
         self.model_optimizer.zero_grad()
         total_loss.backward()
         self.model_optimizer.step()
+        self.model_scheduler.step(total_loss)
 
         return total_loss.item()
 
@@ -248,13 +250,12 @@ class DreamerV3(nn.Module):
 
         return kl_loss
 
-    def train_actor_critic(self, obs):
+    def train_actor_critic(self, obs, h):
         eta = 3e-4  # Entropy weight
         gamma = 0.997  # Discount factor
         lambda_ = 0.95  # Lambda parameter
 
         z = self.encoder(obs)
-        h = torch.randn(obs.size(0), self.h_dim).to(obs.device)
 
         action_t = []
         value_t = []
@@ -310,18 +311,19 @@ class DreamerV3(nn.Module):
         entropy_regularization = -eta * torch.sum(entropy, dim=0).mean()
 
         actor_loss = policy_gradient_loss + entropy_regularization
+        critic_loss = F.mse_loss(value_t, lambda_returns)
+        total_loss = actor_loss + critic_loss
+
         self.actor_optimizer.zero_grad()
-        actor_loss.backward()
+        total_loss.backward()
         self.actor_optimizer.step()
 
-        value_loss = F.mse_loss(value_t, lambda_returns)
-        self.critic_optimizer.zero_grad()
-        value_loss.backward()
-        self.critic_optimizer.step()
+        self.actor_scheduler.step(actor_loss)
+        self.critic_scheduler.step(critic_loss)
 
         return (
             actor_loss.item(),
-            value_loss.item(),
+            critic_loss.item(),
             torch.abs((value_t - lambda_returns).mean(dim=0)),
         )
 

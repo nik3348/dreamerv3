@@ -79,20 +79,21 @@ for epoch in range(epochs):
 
         buffer.add(
             (
-                obs.detach(),
-                obs_pred.detach(),
-                z.detach(),
-                z_pred.detach(),
-                reward.detach(),
-                reward_pred.detach(),
-                done.detach(),
-                cont_pred.detach(),
+                obs,
+                obs_pred,
+                z,
+                z_pred,
+                reward,
+                reward_pred,
+                done,
+                cont_pred,
+                h,
             )
         )
 
-        obs = next_obs.detach()
-        h = h_next.detach()
-        action = action_next.detach()
+        obs = next_obs
+        h = h_next
+        action = action_next
 
     # Train the model
     print("==============================")
@@ -107,6 +108,7 @@ for epoch in range(epochs):
         reward_pred_batch,
         done_batch,
         cont_pred_batch,
+        h_batch,
     ) = zip(*batch)
 
     obs_batch = torch.stack(obs_batch)
@@ -117,25 +119,23 @@ for epoch in range(epochs):
     reward_pred_batch = torch.stack(reward_pred_batch)
     done_batch = torch.stack(done_batch)
     cont_pred_batch = torch.stack(cont_pred_batch)
+    h_batch = torch.stack(h_batch)
 
     batch = (
-        obs_batch.requires_grad_(True),
-        obs_pred_batch.requires_grad_(True),
-        z_batch.requires_grad_(True),
-        z_pred_batch.requires_grad_(True),
-        reward_batch.requires_grad_(True),
-        reward_pred_batch.requires_grad_(True),
-        done_batch.requires_grad_(True),
-        cont_pred_batch.requires_grad_(True),
+        obs_batch,
+        obs_pred_batch,
+        z_batch,
+        z_pred_batch,
+        reward_batch,
+        reward_pred_batch,
+        done_batch,
+        cont_pred_batch,
+        h_batch,
     )
 
     world_model_loss = dreamer.train_world_model(batch)
-    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(batch[0])
+    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(batch[0], batch[-1])
     buffer.update_priorities(indices, td_errors.cpu().detach().numpy())
-
-    dreamer.model_scheduler.step(world_model_loss)
-    dreamer.actor_scheduler.step(actor_loss)
-    dreamer.critic_scheduler.step(critic_loss)
 
     print("World Model Loss", world_model_loss)
     print("Actor Loss", actor_loss)
