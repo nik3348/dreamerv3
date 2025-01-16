@@ -6,14 +6,13 @@ import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 
-from ptnn3.ReplayBuffer import ReplayBuffer
 from ptnn3.DreamerV3 import DreamerV3
 from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-MAX_STEPS = 1000
-epochs = 1
+MAX_STEPS = 10000
+epochs = 100
 batch_size = 1024
 
 h_dim = 64
@@ -27,8 +26,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 y_dim, x_dim, obs_dim = env.observation_space.shape
 dreamer = DreamerV3(obs_dim, h_dim, action_dim, height=height, width=width).to(device)
-world_model_buffer = PrioritizedReplayBuffer(500)
-actor_critic_buffer = ReplayBuffer(500)
+buffer = PrioritizedReplayBuffer(500)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(log_dir)
@@ -42,6 +40,7 @@ except FileNotFoundError:
 for epoch in range(epochs):
     done = False
     steps = 0
+    score = 0
     obs, info = env.reset()
     obs = torch.tensor(obs, dtype=torch.float32).to(device).permute(2, 1, 0) / 255.0
 
@@ -51,6 +50,16 @@ for epoch in range(epochs):
     while not done and steps < MAX_STEPS:
         steps += 1
         selected_action = action.argmax().item()
+
+        if False:
+            try:
+                selected_action = int(input())
+            except ValueError:
+                selected_action = 0
+
+        if torch.rand(1).item() < 0.05:
+            selected_action = env.action_space.sample()
+
         next_obs, reward, terminated, truncated, info = env.step(selected_action)
         done = terminated or truncated
         obs = transforms.Compose([transforms.Resize((32, 32))])(obs)
@@ -60,13 +69,14 @@ for epoch in range(epochs):
             / 255.0
         )
         reward = torch.tensor(reward, dtype=torch.float32).to(device).unsqueeze(0)
+        score += reward.item()
         done = torch.tensor(done, dtype=torch.float32).to(device).unsqueeze(0)
 
         h_next, z, z_pred, reward_pred, cont_pred, obs_pred, action_next, value = (
             dreamer(obs, h, action)
         )
 
-        world_model_buffer.add(
+        buffer.add(
             (
                 obs.detach(),
                 obs_pred.detach(),
@@ -86,8 +96,17 @@ for epoch in range(epochs):
     # Train the model
     print("==============================")
     print("Starting training for epoch", epoch)
-    batch, indices, weights = world_model_buffer.sample(batch_size)
-    obs_batch, obs_pred_batch, z_batch, z_pred_batch, reward_batch, reward_pred_batch, done_batch, cont_pred_batch = zip(*batch)
+    batch, indices, weights = buffer.sample(batch_size)
+    (
+        obs_batch,
+        obs_pred_batch,
+        z_batch,
+        z_pred_batch,
+        reward_batch,
+        reward_pred_batch,
+        done_batch,
+        cont_pred_batch,
+    ) = zip(*batch)
 
     obs_batch = torch.stack(obs_batch)
     obs_pred_batch = torch.stack(obs_pred_batch)
@@ -110,14 +129,19 @@ for epoch in range(epochs):
     )
 
     world_model_loss = dreamer.train_world_model(batch)
+    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(batch[0])
+    buffer.update_priorities(indices, td_errors.cpu().detach().numpy())
     dreamer.scheduler.step(world_model_loss)
+
     print("World Model Loss", world_model_loss)
+    print("Actor Loss", actor_loss)
+    print("Critic Loss", critic_loss)
 
-    actor_critic_loss = dreamer.train_actor_critic(batch[0])
-    print("Actor Critic Loss", actor_critic_loss)
-
-    writer.add_scalar('World Model Loss/train', world_model_loss, epoch)
-    writer.add_scalar('Actor Critic Loss/train', actor_critic_loss, epoch)
+    writer.add_scalar("train/World Model Loss", world_model_loss, epoch)
+    writer.add_scalar("train/Actor Loss", actor_loss, epoch)
+    writer.add_scalar("train/Critic Loss", critic_loss, epoch)
+    writer.add_scalar("train/Total Loss", actor_loss + critic_loss, epoch)
+    writer.add_scalar("train/Score", score, epoch)
 
     torch.save(dreamer.state_dict(), "dreamer.pt")
 

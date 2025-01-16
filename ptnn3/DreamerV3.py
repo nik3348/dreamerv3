@@ -57,11 +57,6 @@ class RSSM(nn.Module):
         self.reward_predictor = nn.Linear(h_dim + z_dim, 1)
         self.continue_predictor = nn.Linear(h_dim + z_dim, 1)
 
-    def sample_latent(self, mean, log_std):
-        std = torch.exp(0.5 * log_std)
-        eps = torch.randn_like(std)
-        return mean + eps * std
-
     def forward(self, z, h, action):
         input = torch.cat([z, action], dim=-1)
 
@@ -296,12 +291,18 @@ class DreamerV3(nn.Module):
         entropy_regularization = -eta * torch.sum(entropy, dim=0).mean()
 
         actor_loss = policy_gradient_loss + entropy_regularization
+        value_loss = F.mse_loss(value_t, lambda_returns)
+        total_loss = actor_loss + value_loss
 
         self.optimizer.zero_grad()
-        actor_loss.backward()
+        total_loss.backward()
         self.optimizer.step()
 
-        return actor_loss.item()
+        return (
+            actor_loss.item(),
+            value_loss.item(),
+            torch.abs((value_t - lambda_returns).mean(dim=0)),
+        )
 
     # Convert to neural net approximate
     # Symlog prediction is in decoder, reward predictor, and critic
