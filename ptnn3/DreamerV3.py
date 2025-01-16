@@ -15,9 +15,9 @@ class Encoder(nn.Module):
         self.fc = nn.Linear(z_dim * (height // 8) * (width // 8), z_dim)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
+        x = F.silu(self.conv1(x))
+        x = F.silu(self.conv2(x))
+        x = F.silu(self.conv3(x))
 
         x = self.flatten(x)
         z = self.fc(x)
@@ -39,11 +39,11 @@ class Decoder(nn.Module):
         )
 
     def forward(self, z):
-        x = F.relu(self.fc(z))
+        x = F.silu(self.fc(z))
         x = x.view(x.size(0), self.z_dim, (self.height // 8), (self.width // 8))
 
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
+        x = F.silu(self.conv1(x))
+        x = F.silu(self.conv2(x))
         x = self.conv3(x)
         return x
 
@@ -54,26 +54,14 @@ class RSSM(nn.Module):
         self.sequence = nn.GRU(z_dim + action_dim, h_dim)
         self.dynamics = nn.Linear(h_dim, z_dim)
 
-        self.reward_predictor = nn.Linear(h_dim + z_dim, 1)
-        self.continue_predictor = nn.Linear(h_dim + z_dim, 1)
-
-    def forward(self, z, h, action):
-        input = torch.cat([z, action], dim=-1)
-
+    def forward(self, input, h):
         h_next, _ = self.sequence(input.unsqueeze(0), h.unsqueeze(0))
         h_next = h_next.squeeze(0)
 
         # dynamics tries to predict the latent state from the previous hidden state
         z_pred = self.dynamics(h)
 
-        # model_state is a bundle of h the hidden state and z the latent state
-        model_state = torch.cat(
-            [h, z], dim=-1
-        )  # TODO: Move reward and cont out of RSSM
-        reward_pred = self.reward_predictor(model_state)
-        cont_flag = torch.sigmoid(self.continue_predictor(model_state))
-
-        return h_next, z_pred, reward_pred, cont_flag
+        return h_next, z_pred
 
 
 class Actor(nn.Module):
@@ -84,8 +72,8 @@ class Actor(nn.Module):
         self.fc3 = nn.Linear(256, action_dim)
 
     def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
+        x = F.silu(self.fc1(state))
+        x = F.silu(self.fc2(x))
         action = torch.tanh(self.fc3(x))
         return action
 
@@ -98,8 +86,8 @@ class Critic(nn.Module):
         self.fc3 = nn.Linear(256, 1)
 
     def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
+        x = F.silu(self.fc1(state))
+        x = F.silu(self.fc2(x))
         value = self.fc3(x)
         return value
 
@@ -124,12 +112,33 @@ class DreamerV3(nn.Module):
         self.encoder = Encoder(input_dim, z_dim, height, width)
         self.decoder = Decoder(h_dim, z_dim, input_dim, height, width)
         self.rssm = RSSM(h_dim, z_dim, action_dim)
+        self.reward_predictor = nn.Linear(h_dim + z_dim, 1)
+        self.continue_predictor = nn.Linear(h_dim + z_dim, 1)
+
         self.actor = Actor(h_dim + z_dim, action_dim)
         self.critic = Critic(h_dim + z_dim)
 
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=10
+        self.model_params = (
+            list(self.encoder.parameters())
+            + list(self.decoder.parameters())
+            + list(self.rssm.parameters())
+            + list(self.reward_predictor.parameters())
+            + list(self.continue_predictor.parameters())
+        )
+
+        self.model_optimizer = torch.optim.Adam(self.model_params, lr=1e-3)
+        self.model_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.model_optimizer, mode="min", factor=0.5, patience=10
+        )
+
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-3)
+        self.actor_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.actor_optimizer, mode="min", factor=0.5, patience=10
+        )
+
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
+        self.critic_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.critic_optimizer, mode="min", factor=0.5, patience=10
         )
 
     def forward(self, obs, h, action):
@@ -140,11 +149,16 @@ class DreamerV3(nn.Module):
 
         z = self.encoder(obs)
         z_sample = self.sample_latent(z)
-        h_next, z_pred, reward_pred, cont_pred = self.rssm(z_sample, h, action)
-        obs_pred = self.decoder(torch.cat([h, z_sample], dim=-1))
+
+        h_next, z_pred = self.rssm(torch.cat([z_sample, action], dim=-1), h)
+        obs_pred = self.decoder(torch.cat([z_sample, h], dim=-1))
+
+        model_state = torch.cat([z_sample, h], dim=-1)
+        reward_pred = self.reward_predictor(model_state)
+        cont_pred = torch.sigmoid(self.continue_predictor(model_state))
 
         z_pred_sample = self.sample_latent(z_pred)
-        model_state = torch.cat([h, z_pred_sample], dim=-1)
+        model_state = torch.cat([z_pred_sample, h], dim=-1)
         action_pred = self.actor(model_state)
         value = self.critic(model_state)
 
@@ -217,9 +231,9 @@ class DreamerV3(nn.Module):
             + representation_coef * representation_loss
         )
 
-        self.optimizer.zero_grad()
+        self.model_optimizer.zero_grad()
         total_loss.backward()
-        self.optimizer.step()
+        self.model_optimizer.step()
 
         return total_loss.item()
 
@@ -249,11 +263,16 @@ class DreamerV3(nn.Module):
 
         T = 16
         for t in range(T):
-            model_state = torch.cat([h, z], dim=-1)
+            model_state = torch.cat([z, h], dim=-1)
             action = self.actor(model_state)
             value = self.critic(model_state)
-            h, z_pred, reward_pred, cont_pred = self.rssm(z, h, action)
+
+            z_sample = self.sample_latent(z)
+            h, z_pred = self.rssm(torch.cat([z_sample, action], dim=-1), h)
             # z = dynamics() for the next step
+
+            reward_pred = self.reward_predictor(model_state)
+            cont_pred = torch.sigmoid(self.continue_predictor(model_state))
 
             # Squeeze since the output is a single value (b, 1) -> (b)
             action_t.append(action)
@@ -291,12 +310,14 @@ class DreamerV3(nn.Module):
         entropy_regularization = -eta * torch.sum(entropy, dim=0).mean()
 
         actor_loss = policy_gradient_loss + entropy_regularization
-        value_loss = F.mse_loss(value_t, lambda_returns)
-        total_loss = actor_loss + value_loss
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
 
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
+        value_loss = F.mse_loss(value_t, lambda_returns)
+        self.critic_optimizer.zero_grad()
+        value_loss.backward()
+        self.critic_optimizer.step()
 
         return (
             actor_loss.item(),

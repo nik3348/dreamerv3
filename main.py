@@ -11,14 +11,14 @@ from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-MAX_STEPS = 10000
-epochs = 100
+MAX_STEPS = 20000
+epochs = 150
 batch_size = 1024
 
-h_dim = 64
+h_dim = 256
 action_dim = 4
-height = 32
-width = 32
+height = 64
+width = 64
 
 gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
@@ -30,7 +30,8 @@ buffer = PrioritizedReplayBuffer(500)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(log_dir)
-torch.autograd.set_detect_anomaly(True)
+pytorch_total_params = sum(p.numel() for p in dreamer.parameters())
+print("Total parameters", pytorch_total_params)
 
 try:
     dreamer.load_state_dict(torch.load("dreamer.pt", weights_only=True))
@@ -62,7 +63,7 @@ for epoch in range(epochs):
 
         next_obs, reward, terminated, truncated, info = env.step(selected_action)
         done = terminated or truncated
-        obs = transforms.Compose([transforms.Resize((32, 32))])(obs)
+        obs = transforms.Compose([transforms.Resize((height, width))])(obs)
 
         next_obs = (
             torch.tensor(next_obs, dtype=torch.float32).to(device).permute(2, 1, 0)
@@ -131,7 +132,10 @@ for epoch in range(epochs):
     world_model_loss = dreamer.train_world_model(batch)
     actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(batch[0])
     buffer.update_priorities(indices, td_errors.cpu().detach().numpy())
-    dreamer.scheduler.step(world_model_loss)
+
+    dreamer.model_scheduler.step(world_model_loss)
+    dreamer.actor_scheduler.step(actor_loss)
+    dreamer.critic_scheduler.step(critic_loss)
 
     print("World Model Loss", world_model_loss)
     print("Actor Loss", actor_loss)
