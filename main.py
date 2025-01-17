@@ -5,15 +5,18 @@ import gymnasium as gym
 
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
+from torchrl.data import ReplayBuffer, LazyTensorStorage, TensorDictReplayBuffer
+from tensordict import TensorDict
 
 from ptnn3.DreamerV3 import DreamerV3
 from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-MAX_STEPS = 20000
-epochs = 150
-batch_size = 1024
+epochs = 1
+number_of_episodes = 1
+number_of_steps = 20000
+batch_size = 512
 
 h_dim = 256
 action_dim = 4
@@ -26,7 +29,6 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 y_dim, x_dim, obs_dim = env.observation_space.shape
 dreamer = DreamerV3(obs_dim, h_dim, action_dim, height=height, width=width).to(device)
-buffer = PrioritizedReplayBuffer(500)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(log_dir)
@@ -38,17 +40,28 @@ try:
 except FileNotFoundError:
     print("No model found")
 
-for epoch in range(epochs):
+for episode in range(number_of_episodes):
     done = False
     steps = 0
-    score = 0
     obs, info = env.reset()
     obs = torch.tensor(obs, dtype=torch.float32).to(device).permute(2, 1, 0) / 255.0
 
     h = torch.randn(h_dim).to(device)
     action = torch.zeros(action_dim).to(device)
 
-    while not done and steps < MAX_STEPS:
+    trajectory = {
+        "obs": [],
+        "obs_pred": [],
+        "z": [],
+        "z_pred": [],
+        "reward": [],
+        "reward_pred": [],
+        "done": [],
+        "cont_pred": [],
+        "h": [],
+    }
+
+    while not done and steps < number_of_steps:
         steps += 1
         selected_action = action.argmax().item()
 
@@ -70,56 +83,35 @@ for epoch in range(epochs):
             / 255.0
         )
         reward = torch.tensor(reward, dtype=torch.float32).to(device).unsqueeze(0)
-        score += reward.item()
         done = torch.tensor(done, dtype=torch.float32).to(device).unsqueeze(0)
 
         h_next, z, z_pred, reward_pred, cont_pred, obs_pred, action_next, value = (
             dreamer(obs, h, action)
         )
 
-        buffer.add(
-            (
-                obs,
-                obs_pred,
-                z,
-                z_pred,
-                reward,
-                reward_pred,
-                done,
-                cont_pred,
-                h,
-            )
-        )
+        trajectory["obs"].append(obs)
+        trajectory["obs_pred"].append(obs_pred)
+        trajectory["z"].append(z)
+        trajectory["z_pred"].append(z_pred)
+        trajectory["reward"].append(reward)
+        trajectory["reward_pred"].append(reward_pred)
+        trajectory["done"].append(done)
+        trajectory["cont_pred"].append(cont_pred)
+        trajectory["h"].append(h)
 
         obs = next_obs
         h = h_next
         action = action_next
 
-    # Train the model
-    print("==============================")
-    print("Starting training for epoch", epoch)
-    batch, indices, weights = buffer.sample(batch_size)
-    (
-        obs_batch,
-        obs_pred_batch,
-        z_batch,
-        z_pred_batch,
-        reward_batch,
-        reward_pred_batch,
-        done_batch,
-        cont_pred_batch,
-        h_batch,
-    ) = zip(*batch)
-
-    obs_batch = torch.stack(obs_batch)
-    obs_pred_batch = torch.stack(obs_pred_batch)
-    z_batch = torch.stack(z_batch)
-    z_pred_batch = torch.stack(z_pred_batch)
-    reward_batch = torch.stack(reward_batch)
-    reward_pred_batch = torch.stack(reward_pred_batch)
-    done_batch = torch.stack(done_batch)
-    cont_pred_batch = torch.stack(cont_pred_batch)
-    h_batch = torch.stack(h_batch)
+    obs_batch = torch.stack(trajectory["obs"])
+    obs_pred_batch = torch.stack(trajectory["obs_pred"])
+    z_batch = torch.stack(trajectory["z"])
+    z_pred_batch = torch.stack(trajectory["z_pred"])
+    reward_batch = torch.stack(trajectory["reward"])
+    reward_pred_batch = torch.stack(trajectory["reward_pred"])
+    done_batch = torch.stack(trajectory["done"])
+    cont_pred_batch = torch.stack(trajectory["cont_pred"])
+    h_batch = torch.stack(trajectory["h"])
 
     batch = (
         obs_batch,
@@ -130,23 +122,44 @@ for epoch in range(epochs):
         reward_pred_batch,
         done_batch,
         cont_pred_batch,
-        h_batch,
     )
 
-    world_model_loss = dreamer.train_world_model(batch)
-    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(batch[0], batch[-1])
-    buffer.update_priorities(indices, td_errors.cpu().detach().numpy())
+    for epoch in range(epochs):
+        # Train the model
+        print("==============================")
+        print("Starting training for epoch", epoch)
+        # print("buffer size", buffer.__len__())
 
-    print("World Model Loss", world_model_loss)
-    print("Actor Loss", actor_loss)
-    print("Critic Loss", critic_loss)
+        world_model_loss = dreamer.train_world_model(batch)
+        actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(
+            obs_batch, h_batch
+        )
+        # buffer.update_priorities(indices, td_errors.cpu().detach().numpy())
 
-    writer.add_scalar("train/World Model Loss", world_model_loss, epoch)
-    writer.add_scalar("train/Actor Loss", actor_loss, epoch)
-    writer.add_scalar("train/Critic Loss", critic_loss, epoch)
-    writer.add_scalar("train/Total Loss", actor_loss + critic_loss, epoch)
-    writer.add_scalar("train/Score", score, epoch)
+        dreamer.model_optimizer.zero_grad()
+        dreamer.actor_optimizer.zero_grad()
+        dreamer.critic_optimizer.zero_grad()
 
-    torch.save(dreamer.state_dict(), "dreamer.pt")
+        total_loss = world_model_loss + actor_loss + critic_loss
+        total_loss.backward()
+
+        dreamer.model_optimizer.step()
+        dreamer.actor_optimizer.step()
+        dreamer.critic_optimizer.step()
+
+        dreamer.model_scheduler.step(world_model_loss)
+        dreamer.actor_scheduler.step(actor_loss)
+        dreamer.critic_scheduler.step(critic_loss)
+
+        print("World Model Loss", world_model_loss)
+        print("Actor Loss", actor_loss)
+        print("Critic Loss", critic_loss)
+
+        writer.add_scalar("train/World Model Loss", world_model_loss, epoch)
+        writer.add_scalar("train/Actor Loss", actor_loss, epoch)
+        writer.add_scalar("train/Critic Loss", critic_loss, epoch)
+        writer.add_scalar("train/Total Loss", actor_loss + critic_loss, epoch)
+
+        torch.save(dreamer.state_dict(), "dreamer.pt")
 
 env.close()

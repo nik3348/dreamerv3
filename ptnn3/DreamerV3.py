@@ -207,7 +207,6 @@ class DreamerV3(nn.Module):
             reward_pred,
             done,
             cont_pred,
-            _,
         ) = batch
 
         # Compute the prediction losses
@@ -232,12 +231,7 @@ class DreamerV3(nn.Module):
             + representation_coef * representation_loss
         )
 
-        self.model_optimizer.zero_grad()
-        total_loss.backward()
-        self.model_optimizer.step()
-        self.model_scheduler.step(total_loss)
-
-        return total_loss.item()
+        return total_loss
 
     def compute_kl_divergence(self, p_logits, q_logits):
         q_probs = F.softmax(q_logits, dim=-1)
@@ -312,18 +306,10 @@ class DreamerV3(nn.Module):
 
         actor_loss = policy_gradient_loss + entropy_regularization
         critic_loss = F.mse_loss(value_t, lambda_returns)
-        total_loss = actor_loss + critic_loss
-
-        self.actor_optimizer.zero_grad()
-        total_loss.backward()
-        self.actor_optimizer.step()
-
-        self.actor_scheduler.step(actor_loss)
-        self.critic_scheduler.step(critic_loss)
 
         return (
-            actor_loss.item(),
-            critic_loss.item(),
+            actor_loss,
+            critic_loss,
             torch.abs((value_t - lambda_returns).mean(dim=0)),
         )
 
