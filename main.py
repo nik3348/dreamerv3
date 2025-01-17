@@ -5,17 +5,13 @@ import gymnasium as gym
 
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
-from torchrl.data import ReplayBuffer, LazyTensorStorage, TensorDictReplayBuffer
-from tensordict import TensorDict
 
 from ptnn3.DreamerV3 import DreamerV3
-from ptnn3.PrioritizedReplayBuffer import PrioritizedReplayBuffer
 
 
 isHuman = False
-epochs = 1
-number_of_episodes = 1
-number_of_steps = 20000
+number_of_episodes = 150
+number_of_steps = 10000
 batch_size = 512
 
 h_dim = 256
@@ -32,6 +28,7 @@ dreamer = DreamerV3(obs_dim, h_dim, action_dim, height=height, width=width).to(d
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(log_dir)
+
 pytorch_total_params = sum(p.numel() for p in dreamer.parameters())
 print("Total parameters", pytorch_total_params)
 
@@ -43,6 +40,7 @@ except FileNotFoundError:
 for episode in range(number_of_episodes):
     done = False
     steps = 0
+    score = 0
     obs, info = env.reset()
     obs = torch.tensor(obs, dtype=torch.float32).to(device).permute(2, 1, 0) / 255.0
 
@@ -102,6 +100,7 @@ for episode in range(number_of_episodes):
         obs = next_obs
         h = h_next
         action = action_next
+        score += reward.item()
 
     obs_batch = torch.stack(trajectory["obs"])
     obs_pred_batch = torch.stack(trajectory["obs_pred"])
@@ -124,42 +123,41 @@ for episode in range(number_of_episodes):
         cont_pred_batch,
     )
 
-    for epoch in range(epochs):
-        # Train the model
-        print("==============================")
-        print("Starting training for epoch", epoch)
-        # print("buffer size", buffer.__len__())
+    # Train the model
+    print("==============================")
+    print("Steps:", steps)
+    print("Starting training for epoch", episode)
 
-        world_model_loss = dreamer.train_world_model(batch)
-        actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(
-            obs_batch, h_batch
-        )
-        # buffer.update_priorities(indices, td_errors.cpu().detach().numpy())
+    world_model_loss = dreamer.train_world_model(batch)
+    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(
+        obs_batch, h_batch
+    )
 
-        dreamer.model_optimizer.zero_grad()
-        dreamer.actor_optimizer.zero_grad()
-        dreamer.critic_optimizer.zero_grad()
+    dreamer.model_optimizer.zero_grad()
+    dreamer.actor_optimizer.zero_grad()
+    dreamer.critic_optimizer.zero_grad()
 
-        total_loss = world_model_loss + actor_loss + critic_loss
-        total_loss.backward()
+    (world_model_loss).backward(retain_graph=True)
+    (actor_loss).backward(retain_graph=True)
+    (critic_loss).backward()
 
-        dreamer.model_optimizer.step()
-        dreamer.actor_optimizer.step()
-        dreamer.critic_optimizer.step()
+    dreamer.model_optimizer.step()
+    dreamer.actor_optimizer.step()
+    dreamer.critic_optimizer.step()
 
-        dreamer.model_scheduler.step(world_model_loss)
-        dreamer.actor_scheduler.step(actor_loss)
-        dreamer.critic_scheduler.step(critic_loss)
+    dreamer.model_scheduler.step(world_model_loss)
+    dreamer.actor_scheduler.step(actor_loss)
+    dreamer.critic_scheduler.step(critic_loss)
 
-        print("World Model Loss", world_model_loss)
-        print("Actor Loss", actor_loss)
-        print("Critic Loss", critic_loss)
+    print("World Model Loss", world_model_loss)
+    print("Actor Loss", actor_loss)
+    print("Critic Loss", critic_loss)
 
-        writer.add_scalar("train/World Model Loss", world_model_loss, epoch)
-        writer.add_scalar("train/Actor Loss", actor_loss, epoch)
-        writer.add_scalar("train/Critic Loss", critic_loss, epoch)
-        writer.add_scalar("train/Total Loss", actor_loss + critic_loss, epoch)
+    writer.add_scalar("train/World Model Loss", world_model_loss, episode)
+    writer.add_scalar("train/Actor Loss", actor_loss, episode)
+    writer.add_scalar("train/Critic Loss", critic_loss, episode)
+    writer.add_scalar("train/Score", score, episode)
 
-        torch.save(dreamer.state_dict(), "dreamer.pt")
+    torch.save(dreamer.state_dict(), "dreamer.pt")
 
 env.close()
