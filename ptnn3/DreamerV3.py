@@ -11,13 +11,25 @@ class Encoder(nn.Module):
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(64, z_dim, kernel_size=4, stride=2, padding=1)
 
+        self.norm1 = nn.LayerNorm(32)
+        self.norm2 = nn.LayerNorm(64)
+        self.norm3 = nn.LayerNorm(z_dim)
+
         self.flatten = nn.Flatten()
         self.fc = nn.Linear(z_dim * (height // 8) * (width // 8), z_dim)
 
     def forward(self, x):
-        x = F.silu(self.conv1(x))
-        x = F.silu(self.conv2(x))
-        x = F.silu(self.conv3(x))
+        x = self.conv1(x)
+        x = self.norm1(x.permute(0, 2, 3, 1))
+        x = F.silu(x.permute(0, 3, 1, 2))
+
+        x = self.conv2(x)
+        x = self.norm2(x.permute(0, 2, 3, 1))
+        x = F.silu(x.permute(0, 3, 1, 2))
+
+        x = self.conv3(x)
+        x = self.norm3(x.permute(0, 2, 3, 1))
+        x = F.silu(x.permute(0, 3, 1, 2))
 
         x = self.flatten(x)
         z = self.fc(x)
@@ -32,36 +44,44 @@ class Decoder(nn.Module):
         self.width = width
 
         self.fc = nn.Linear(h_dim + z_dim, z_dim * (height // 8) * (width // 8))
+
         self.conv1 = nn.ConvTranspose2d(z_dim, 64, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.ConvTranspose2d(
             32, output_dim, kernel_size=4, stride=2, padding=1
         )
 
+        self.norm1 = nn.LayerNorm(64)
+        self.norm2 = nn.LayerNorm(32)
+
     def forward(self, z):
         x = F.silu(self.fc(z))
         x = x.view(x.size(0), self.z_dim, (self.height // 8), (self.width // 8))
 
-        x = F.silu(self.conv1(x))
-        x = F.silu(self.conv2(x))
+        x = self.conv1(x)
+        x = self.norm1(x.permute(0, 2, 3, 1))
+        x = F.silu(x.permute(0, 3, 1, 2))
+
+        x = self.conv2(x)
+        x = self.norm2(x.permute(0, 2, 3, 1))
+        x = F.silu(x.permute(0, 3, 1, 2))
+
         x = self.conv3(x)
+        x = F.sigmoid(x)
+
         return x
 
 
 class RSSM(nn.Module):
-    def __init__(self, h_dim, z_dim, action_dim):
+    def __init__(self, input_dim, h_dim):
         super(RSSM, self).__init__()
-        self.sequence = nn.GRU(z_dim + action_dim, h_dim)
-        self.dynamics = nn.Linear(h_dim, z_dim)
+        self.sequence = nn.GRU(input_dim, h_dim)
 
     def forward(self, input, h):
         h_next, _ = self.sequence(input.unsqueeze(0), h.unsqueeze(0))
         h_next = h_next.squeeze(0)
 
-        # dynamics tries to predict the latent state from the previous hidden state
-        z_pred = self.dynamics(h)
-
-        return h_next, z_pred
+        return h_next
 
 
 class Actor(nn.Module):
@@ -111,7 +131,8 @@ class DreamerV3(nn.Module):
 
         self.encoder = Encoder(input_dim, z_dim, height, width)
         self.decoder = Decoder(h_dim, z_dim, input_dim, height, width)
-        self.rssm = RSSM(h_dim, z_dim, action_dim)
+        self.rssm = RSSM(z_dim + action_dim, h_dim)
+        self.dynamics_predictor = nn.Linear(h_dim, z_dim)
         self.reward_predictor = nn.Linear(h_dim + z_dim, 1)
         self.continue_predictor = nn.Linear(h_dim + z_dim, 1)
 
@@ -126,19 +147,19 @@ class DreamerV3(nn.Module):
             + list(self.continue_predictor.parameters())
         )
 
-        self.model_optimizer = torch.optim.Adam(self.model_params, lr=1e-3)
+        self.model_optimizer = torch.optim.Adam(self.model_params, lr=1e-4)
         self.model_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.model_optimizer, mode="min", factor=0.5, patience=10
+            self.model_optimizer, mode="min", factor=0.1, patience=10
         )
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-3)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
         self.actor_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.actor_optimizer, mode="min", factor=0.5, patience=10
+            self.actor_optimizer, mode="min", factor=0.1, patience=10
         )
 
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
         self.critic_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.critic_optimizer, mode="min", factor=0.5, patience=10
+            self.critic_optimizer, mode="min", factor=0.1, patience=10
         )
 
     def forward(self, obs, h, action):
@@ -150,25 +171,23 @@ class DreamerV3(nn.Module):
         z = self.encoder(obs)
         z_sample = self.sample_latent(z)
 
-        h_next, z_pred = self.rssm(torch.cat([z_sample, action], dim=-1), h)
-        obs_pred = self.decoder(torch.cat([z_sample, h], dim=-1))
+        # z_pred is from current h
+        z_pred = self.dynamics_predictor(h)
+        z_pred_sample = self.sample_latent(z_pred)
 
+        h_next = self.rssm(torch.cat([z_sample, action], dim=-1), h)
         model_state = torch.cat([z_sample, h], dim=-1)
+
         reward_pred = self.reward_predictor(model_state)
         cont_pred = torch.sigmoid(self.continue_predictor(model_state))
-
-        z_pred_sample = self.sample_latent(z_pred)
-        model_state = torch.cat([z_pred_sample, h], dim=-1)
+        obs_pred = self.decoder(model_state)
         action_pred = self.actor(model_state)
         value = self.critic(model_state)
 
-        z = z.view(-1, self.latent_dim, self.num_categories)
-        z_pred = z_pred.view(-1, self.latent_dim, self.num_categories)
-
         # Squeeze to remove the batch dimension
         h_next = h_next.squeeze(0)
-        z = z.squeeze(0)
-        z_pred = z_pred.squeeze(0)
+        z = z_sample.squeeze(0)
+        z_pred = z_pred_sample.squeeze(0)
         reward_pred = reward_pred.squeeze(0)
         cont_pred = cont_pred.squeeze(0)
         obs_pred = obs_pred.squeeze(0)
@@ -186,17 +205,6 @@ class DreamerV3(nn.Module):
             value,
         )
 
-    def sample_latent(self, z):
-        z = z.view(-1, self.latent_dim, self.num_categories)
-
-        probs = F.softmax(z, dim=-1)
-        z_hard = torch.argmax(probs, dim=-1)
-        sample = F.one_hot(z_hard, num_classes=self.num_categories).float()
-
-        sample = (sample + probs) - probs.detach()
-        sample = sample.view(sample.size(0), -1)
-        return sample
-
     def train_world_model(self, batch):
         (
             obs,
@@ -211,13 +219,13 @@ class DreamerV3(nn.Module):
 
         # Compute the prediction losses
         obs_loss = F.mse_loss(obs_pred, obs)
-        reward_loss = F.mse_loss(reward_pred, reward)
+        reward_loss = F.mse_loss(self.symlog(reward_pred), self.symlog(reward))
         cont_loss = F.binary_cross_entropy(cont_pred, done.float())
 
         pred_coef = 1
         pred_loss = obs_loss + reward_loss + cont_loss
 
-        dynamics_coef = 0.5
+        dynamics_coef = 1
         dynamics_kl_div = self.compute_kl_divergence(z.detach(), z_pred).mean()
         dynamics_loss = torch.clamp(dynamics_kl_div, min=1.0)
 
@@ -231,7 +239,7 @@ class DreamerV3(nn.Module):
             + representation_coef * representation_loss
         )
 
-        return total_loss
+        return total_loss, obs_loss, reward_loss, cont_loss
 
     def compute_kl_divergence(self, p_logits, q_logits):
         q_probs = F.softmax(q_logits, dim=-1)
@@ -258,16 +266,16 @@ class DreamerV3(nn.Module):
 
         T = 16
         for t in range(T):
-            model_state = torch.cat([z, h], dim=-1)
+            z_sample = self.sample_latent(z)
+            model_state = torch.cat([z_sample, h], dim=-1)
+
             action = self.actor(model_state)
             value = self.critic(model_state)
-
-            z_sample = self.sample_latent(z)
-            h, z_pred = self.rssm(torch.cat([z_sample, action], dim=-1), h)
-            # z = dynamics() for the next step
-
             reward_pred = self.reward_predictor(model_state)
             cont_pred = torch.sigmoid(self.continue_predictor(model_state))
+
+            h = self.rssm(torch.cat([z_sample, action], dim=-1), h)
+            z = self.dynamics_predictor(h)
 
             # Squeeze since the output is a single value (b, 1) -> (b)
             action_t.append(action)
@@ -310,8 +318,19 @@ class DreamerV3(nn.Module):
         return (
             actor_loss,
             critic_loss,
-            torch.abs((value_t - lambda_returns).mean(dim=0)),
+            torch.sum(value_t - lambda_returns).mean(dim=0),
         )
+
+    def sample_latent(self, z):
+        z = z.view(-1, self.latent_dim, self.num_categories)
+
+        probs = F.softmax(z, dim=-1)
+        z_hard = torch.argmax(probs, dim=-1)
+        sample = F.one_hot(z_hard, num_classes=self.num_categories).float()
+
+        sample = (sample + probs) - probs.detach()
+        sample = sample.view(sample.size(0), -1)
+        return sample
 
     # Convert to neural net approximate
     # Symlog prediction is in decoder, reward predictor, and critic

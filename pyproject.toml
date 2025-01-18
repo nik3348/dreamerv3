@@ -9,10 +9,12 @@ readme = "README.md"
 python = "^3.10"
 ale-py = "^0.10.1"
 torch = "^2.5.1"
-gymnasium = "^1.0.0"
+gymnasium = {extras = ["other"], version = "^1.0.0"}
 tensorboard = "^2.18.0"
 torchvision = "^0.20.1"
 torchrl = "^0.6.0"
+matplotlib = "^3.10.0"
+pyqt6 = "^6.8.0"
 
 
 [build-system]

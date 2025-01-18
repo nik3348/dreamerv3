@@ -4,27 +4,29 @@ import torch
 import gymnasium as gym
 
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import transforms
-
+from gymnasium.wrappers import ResizeObservation, MaxAndSkipObservation
 from ptnn3.DreamerV3 import DreamerV3
 
 
 isHuman = False
-number_of_episodes = 150
+number_of_episodes = 5000
 number_of_steps = 10000
 batch_size = 512
-
-h_dim = 256
-action_dim = 4
 height = 64
 width = 64
+h_dim = 256
+rand_chance = 0.2
 
 gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+env = ResizeObservation(env, (height, width))
+env = MaxAndSkipObservation(env, skip=4)
 
 y_dim, x_dim, obs_dim = env.observation_space.shape
-dreamer = DreamerV3(obs_dim, h_dim, action_dim, height=height, width=width).to(device)
+action_dim = env.action_space.n
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+dreamer = DreamerV3(obs_dim, h_dim, action_dim, height=y_dim, width=x_dim).to(device)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(log_dir)
@@ -42,7 +44,7 @@ for episode in range(number_of_episodes):
     steps = 0
     score = 0
     obs, info = env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32).to(device).permute(2, 1, 0) / 255.0
+    obs = torch.tensor(obs, dtype=torch.float32).to(device).permute(2, 0, 1) / 255.0
 
     h = torch.randn(h_dim).to(device)
     action = torch.zeros(action_dim).to(device)
@@ -69,15 +71,15 @@ for episode in range(number_of_episodes):
             except ValueError:
                 selected_action = 0
 
-        if torch.rand(1).item() < 0.05:
+        if torch.rand(1).item() < rand_chance:
             selected_action = env.action_space.sample()
 
         next_obs, reward, terminated, truncated, info = env.step(selected_action)
+        score += reward
         done = terminated or truncated
-        obs = transforms.Compose([transforms.Resize((height, width))])(obs)
 
         next_obs = (
-            torch.tensor(next_obs, dtype=torch.float32).to(device).permute(2, 1, 0)
+            torch.tensor(next_obs, dtype=torch.float32).to(device).permute(2, 0, 1)
             / 255.0
         )
         reward = torch.tensor(reward, dtype=torch.float32).to(device).unsqueeze(0)
@@ -100,7 +102,6 @@ for episode in range(number_of_episodes):
         obs = next_obs
         h = h_next
         action = action_next
-        score += reward.item()
 
     obs_batch = torch.stack(trajectory["obs"])
     obs_pred_batch = torch.stack(trajectory["obs_pred"])
@@ -125,13 +126,12 @@ for episode in range(number_of_episodes):
 
     # Train the model
     print("==============================")
-    print("Steps:", steps)
-    print("Starting training for epoch", episode)
+    print(f"Starting training for episode {episode} - {steps} steps")
 
-    world_model_loss = dreamer.train_world_model(batch)
-    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(
-        obs_batch, h_batch
+    world_model_loss, obs_loss, reward_loss, cont_loss = dreamer.train_world_model(
+        batch
     )
+    actor_loss, critic_loss, td_errors = dreamer.train_actor_critic(obs_batch, h_batch)
 
     dreamer.model_optimizer.zero_grad()
     dreamer.actor_optimizer.zero_grad()
@@ -145,18 +145,21 @@ for episode in range(number_of_episodes):
     dreamer.actor_optimizer.step()
     dreamer.critic_optimizer.step()
 
-    dreamer.model_scheduler.step(world_model_loss)
-    dreamer.actor_scheduler.step(actor_loss)
-    dreamer.critic_scheduler.step(critic_loss)
+    # dreamer.model_scheduler.step(world_model_loss)
+    # dreamer.actor_scheduler.step(actor_loss)
+    # dreamer.critic_scheduler.step(critic_loss)
 
-    print("World Model Loss", world_model_loss)
-    print("Actor Loss", actor_loss)
-    print("Critic Loss", critic_loss)
+    writer.add_scalar("World Model/Total Loss", world_model_loss, episode)
+    writer.add_scalar("World Model/Obs Loss", obs_loss, episode)
+    writer.add_scalar("World Model/Reward Loss", reward_loss, episode)
+    writer.add_scalar("World Model/Cont Loss", cont_loss, episode)
+    writer.add_scalar("Actor Critic/Actor Loss", actor_loss, episode)
+    writer.add_scalar("Actor Critic/Critic Loss", critic_loss, episode)
+    writer.add_scalar("Actor Critic/TD Errors Loss", td_errors, episode)
+    writer.add_scalar("Score", score, episode)
 
-    writer.add_scalar("train/World Model Loss", world_model_loss, episode)
-    writer.add_scalar("train/Actor Loss", actor_loss, episode)
-    writer.add_scalar("train/Critic Loss", critic_loss, episode)
-    writer.add_scalar("train/Score", score, episode)
+    writer.add_image("Obs/Orignal", obs, steps)
+    writer.add_image("Obs/Prediction", obs_pred, steps)
 
     torch.save(dreamer.state_dict(), "dreamer.pt")
 
