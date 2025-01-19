@@ -94,7 +94,7 @@ class Actor(nn.Module):
     def forward(self, state):
         x = F.silu(self.fc1(state))
         x = F.silu(self.fc2(x))
-        action = torch.tanh(self.fc3(x))
+        action = self.fc3(x)
         return action
 
 
@@ -104,6 +104,9 @@ class Critic(nn.Module):
         self.fc1 = nn.Linear(state_dim, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
+
+        nn.init.zeros_(self.fc3.weight)
+        nn.init.zeros_(self.fc3.bias)
 
     def forward(self, state):
         x = F.silu(self.fc1(state))
@@ -139,6 +142,9 @@ class DreamerV3(nn.Module):
         self.actor = Actor(h_dim + z_dim, action_dim)
         self.critic = Critic(h_dim + z_dim)
 
+        nn.init.zeros_(self.reward_predictor.weight)
+        nn.init.zeros_(self.reward_predictor.bias)
+
         self.model_params = (
             list(self.encoder.parameters())
             + list(self.decoder.parameters())
@@ -171,10 +177,6 @@ class DreamerV3(nn.Module):
         z = self.encoder(obs)
         z_sample = self.sample_latent(z)
 
-        # z_pred is from current h
-        z_pred = self.dynamics_predictor(h)
-        z_pred_sample = self.sample_latent(z_pred)
-
         h_next = self.rssm(torch.cat([z_sample, action], dim=-1), h)
         model_state = torch.cat([z_sample, h], dim=-1)
 
@@ -184,10 +186,13 @@ class DreamerV3(nn.Module):
         action_pred = self.actor(model_state)
         value = self.critic(model_state)
 
+        # z_pred is from current h
+        z_pred = self.dynamics_predictor(h)
+
         # Squeeze to remove the batch dimension
         h_next = h_next.squeeze(0)
-        z = z_sample.squeeze(0)
-        z_pred = z_pred_sample.squeeze(0)
+        z = z.squeeze(0)
+        z_pred = z_pred.squeeze(0)
         reward_pred = reward_pred.squeeze(0)
         cont_pred = cont_pred.squeeze(0)
         obs_pred = obs_pred.squeeze(0)
@@ -219,7 +224,7 @@ class DreamerV3(nn.Module):
 
         # Compute the prediction losses
         obs_loss = F.mse_loss(obs_pred, obs)
-        reward_loss = F.mse_loss(self.symlog(reward_pred), self.symlog(reward))
+        reward_loss = F.mse_loss(reward_pred, reward)
         cont_loss = F.binary_cross_entropy(cont_pred, done.float())
 
         pred_coef = 1
@@ -240,17 +245,6 @@ class DreamerV3(nn.Module):
         )
 
         return total_loss, obs_loss, reward_loss, cont_loss
-
-    def compute_kl_divergence(self, p_logits, q_logits):
-        q_probs = F.softmax(q_logits, dim=-1)
-        q_log_probs = F.log_softmax(q_logits, dim=-1)
-        p_log_probs = F.log_softmax(p_logits, dim=-1)
-
-        kl_per_category = q_probs * (q_log_probs - p_log_probs)
-        kl_per_row = kl_per_category.sum(dim=-1)
-        kl_loss = kl_per_row.sum(dim=-1)
-
-        return kl_loss
 
     def train_actor_critic(self, obs, h):
         eta = 3e-4  # Entropy weight
@@ -308,6 +302,7 @@ class DreamerV3(nn.Module):
         policy_gradient_loss = -torch.sum(scaled_returns, dim=0).mean()
 
         policy_probs = F.softmax(action_t, dim=-1)  # Shape [T, B, A]
+        policy_probs = self.mix_probabilities(policy_probs)
         policy_log_probs = F.log_softmax(action_t, dim=-1)  # Shape [T, B, A]
         entropy = -(policy_probs * policy_log_probs).sum(dim=-1)  # Shape [T, B]
         entropy_regularization = -eta * torch.sum(entropy, dim=0).mean()
@@ -321,16 +316,39 @@ class DreamerV3(nn.Module):
             torch.sum(value_t - lambda_returns).mean(dim=0),
         )
 
+    def compute_kl_divergence(self, p_logits, q_logits):
+        p_logits = p_logits.view(-1, self.latent_dim, self.num_categories)
+        q_logits = q_logits.view(-1, self.latent_dim, self.num_categories)
+
+        q_probs = F.softmax(q_logits, dim=-1)
+        q_probs = self.mix_probabilities(q_probs)
+
+        q_log_probs = F.log_softmax(q_logits, dim=-1)
+        p_log_probs = F.log_softmax(p_logits, dim=-1)
+
+        kl_per_category = q_probs * (q_log_probs - p_log_probs)
+        kl_per_latent = kl_per_category.sum(dim=-1)
+
+        kl_loss = kl_per_latent.sum(dim=-1)
+        return kl_loss.mean()
+
     def sample_latent(self, z):
         z = z.view(-1, self.latent_dim, self.num_categories)
 
         probs = F.softmax(z, dim=-1)
+        probs = self.mix_probabilities(probs)
+
         z_hard = torch.argmax(probs, dim=-1)
         sample = F.one_hot(z_hard, num_classes=self.num_categories).float()
 
         sample = (sample + probs) - probs.detach()
         sample = sample.view(sample.size(0), -1)
         return sample
+
+    def mix_probabilities(self, probs, mix_ratio=0.01):
+        uniform_probs = torch.full_like(probs, 1.0 / self.num_categories)
+        mixed_probs = (1 - mix_ratio) * probs + mix_ratio * uniform_probs
+        return mixed_probs
 
     # Convert to neural net approximate
     # Symlog prediction is in decoder, reward predictor, and critic

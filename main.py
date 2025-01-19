@@ -15,7 +15,7 @@ batch_size = 512
 height = 64
 width = 64
 h_dim = 256
-rand_chance = 0.2
+rand_chance = 0.35
 
 gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
@@ -63,7 +63,8 @@ for episode in range(number_of_episodes):
 
     while not done and steps < number_of_steps:
         steps += 1
-        selected_action = action.argmax().item()
+        action_distribution = torch.distributions.Categorical(logits=action)
+        selected_action = action_distribution.sample()
 
         if False:
             try:
@@ -74,12 +75,12 @@ for episode in range(number_of_episodes):
         if torch.rand(1).item() < rand_chance:
             selected_action = env.action_space.sample()
 
-        next_obs, reward, terminated, truncated, info = env.step(selected_action)
+        obs_next, reward, terminated, truncated, info = env.step(selected_action)
         score += reward
         done = terminated or truncated
 
-        next_obs = (
-            torch.tensor(next_obs, dtype=torch.float32).to(device).permute(2, 0, 1)
+        obs_next = (
+            torch.tensor(obs_next, dtype=torch.float32).to(device).permute(2, 0, 1)
             / 255.0
         )
         reward = torch.tensor(reward, dtype=torch.float32).to(device).unsqueeze(0)
@@ -99,7 +100,7 @@ for episode in range(number_of_episodes):
         trajectory["cont_pred"].append(cont_pred)
         trajectory["h"].append(h)
 
-        obs = next_obs
+        obs = obs_next
         h = h_next
         action = action_next
 
@@ -158,9 +159,10 @@ for episode in range(number_of_episodes):
     writer.add_scalar("Actor Critic/TD Errors Loss", td_errors, episode)
     writer.add_scalar("Score", score, episode)
 
-    writer.add_image("Obs/Orignal", obs, steps)
-    writer.add_image("Obs/Prediction", obs_pred, steps)
+    writer.add_image("Obs/Orignal", obs, episode)
+    writer.add_image("Obs/Prediction", obs_pred, episode)
 
     torch.save(dreamer.state_dict(), "dreamer.pt")
+    print("Saved")
 
 env.close()
