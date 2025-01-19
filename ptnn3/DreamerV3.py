@@ -16,7 +16,8 @@ class Encoder(nn.Module):
         self.norm3 = nn.LayerNorm(z_dim)
 
         self.flatten = nn.Flatten()
-        self.fc = nn.Linear(z_dim * (height // 8) * (width // 8), z_dim)
+        self.fc1 = nn.Linear(z_dim * (height // 8) * (width // 8), 256)
+        self.fc2 = nn.Linear(256, z_dim)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -32,7 +33,8 @@ class Encoder(nn.Module):
         x = F.silu(x.permute(0, 3, 1, 2))
 
         x = self.flatten(x)
-        z = self.fc(x)
+        x = F.silu(self.fc1(x))
+        z = self.fc2(x)
         return z
 
 
@@ -43,7 +45,8 @@ class Decoder(nn.Module):
         self.height = height
         self.width = width
 
-        self.fc = nn.Linear(h_dim + z_dim, z_dim * (height // 8) * (width // 8))
+        self.fc1 = nn.Linear(h_dim + z_dim, 256)
+        self.fc2 = nn.Linear(256, z_dim * (height // 8) * (width // 8))
 
         self.conv1 = nn.ConvTranspose2d(z_dim, 64, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
@@ -55,7 +58,8 @@ class Decoder(nn.Module):
         self.norm2 = nn.LayerNorm(32)
 
     def forward(self, z):
-        x = F.silu(self.fc(z))
+        x = F.silu(self.fc1(z))
+        x = F.silu(self.fc2(x))
         x = x.view(x.size(0), self.z_dim, (self.height // 8), (self.width // 8))
 
         x = self.conv1(x)
@@ -313,7 +317,7 @@ class DreamerV3(nn.Module):
         return (
             actor_loss,
             critic_loss,
-            torch.sum(value_t - lambda_returns).mean(dim=0),
+            torch.sum(value_t - lambda_returns, dim=0).mean(),
         )
 
     def compute_kl_divergence(self, p_logits, q_logits):

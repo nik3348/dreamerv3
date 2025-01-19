@@ -9,18 +9,19 @@ from ptnn3.DreamerV3 import DreamerV3
 
 
 isHuman = False
-number_of_episodes = 5000
+number_of_episodes = 200
 number_of_steps = 10000
 batch_size = 512
-height = 64
-width = 64
+height = 32
+width = 32
 h_dim = 256
-rand_chance = 0.35
+rand_chance = 0.2
+frame_skips = 4
 
 gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="human" if isHuman else "rgb_array")
 env = ResizeObservation(env, (height, width))
-env = MaxAndSkipObservation(env, skip=4)
+# env = MaxAndSkipObservation(env, skip=frame_skips)
 
 y_dim, x_dim, obs_dim = env.observation_space.shape
 action_dim = env.action_space.n
