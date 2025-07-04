@@ -303,13 +303,22 @@ class DreamerV3(nn.Module):
         )
         scaling_factor = torch.clamp(scaling_factor, min=1.0)
         scaled_returns = lambda_returns / scaling_factor
-        policy_gradient_loss = -torch.sum(scaled_returns, dim=0).mean()
 
         policy_probs = F.softmax(action_t, dim=-1)  # Shape [T, B, A]
         policy_probs = self.mix_probabilities(policy_probs)
+
+        flat_policy_probs = policy_probs.view(-1, policy_probs.size(-1))
+        actions_taken = torch.multinomial(flat_policy_probs, num_samples=1)
+        actions_taken = actions_taken.view(policy_probs.size(0), policy_probs.size(1))
+
         policy_log_probs = F.log_softmax(action_t, dim=-1)  # Shape [T, B, A]
         entropy = -(policy_probs * policy_log_probs).sum(dim=-1)  # Shape [T, B]
-        entropy_regularization = -eta * torch.sum(entropy, dim=0).mean()
+        entropy_regularization = -eta * torch.mean(entropy)
+
+        chosen_log_probs = policy_log_probs.gather(
+            dim=-1, index=actions_taken.unsqueeze(-1)
+        ).squeeze(-1)
+        policy_gradient_loss = -torch.mean(chosen_log_probs * scaled_returns)
 
         actor_loss = policy_gradient_loss + entropy_regularization
         critic_loss = F.mse_loss(value_t, lambda_returns)
@@ -317,7 +326,7 @@ class DreamerV3(nn.Module):
         return (
             actor_loss,
             critic_loss,
-            torch.sum(value_t - lambda_returns, dim=0).mean(),
+            torch.sum(value_t - lambda_returns, dim=0),
         )
 
     def compute_kl_divergence(self, p_logits, q_logits):

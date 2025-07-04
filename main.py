@@ -4,6 +4,11 @@ import torch
 import gymnasium as gym
 
 from torch.utils.tensorboard import SummaryWriter
+from tensordict import TensorDict
+from torchrl.data import ReplayBuffer, LazyMemmapStorage, LazyTensorStorage, ListStorage
+from torchrl.data.replay_buffers.samplers import PrioritizedSampler
+from torch.utils._pytree import tree_map
+
 from gymnasium.wrappers import ResizeObservation, MaxAndSkipObservation
 from ptnn3.DreamerV3 import DreamerV3
 
@@ -15,7 +20,6 @@ batch_size = 512
 height = 32
 width = 32
 h_dim = 256
-rand_chance = 0.2
 frame_skips = 4
 
 gym.register_envs(ale_py)
@@ -72,9 +76,6 @@ for episode in range(number_of_episodes):
                 selected_action = int(input())
             except ValueError:
                 selected_action = 0
-
-        if torch.rand(1).item() < rand_chance:
-            selected_action = env.action_space.sample()
 
         obs_next, reward, terminated, truncated, info = env.step(selected_action)
         score += reward
@@ -157,13 +158,13 @@ for episode in range(number_of_episodes):
     writer.add_scalar("World Model/Cont Loss", cont_loss, episode)
     writer.add_scalar("Actor Critic/Actor Loss", actor_loss, episode)
     writer.add_scalar("Actor Critic/Critic Loss", critic_loss, episode)
-    writer.add_scalar("Actor Critic/TD Errors Loss", td_errors, episode)
     writer.add_scalar("Score", score, episode)
 
     writer.add_image("Obs/Orignal", obs, episode)
     writer.add_image("Obs/Prediction", obs_pred, episode)
 
-    torch.save(dreamer.state_dict(), "dreamer.pt")
-    print("Saved")
+    if episode + 1 % 50 == 0:
+        torch.save(dreamer.state_dict(), "dreamer.pt")
+        print("Saved")
 
 env.close()
